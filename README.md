@@ -1,18 +1,21 @@
-# Voice Agent Starter — Powered by Murf Falcon
+# Farm & Field Voice Assistant — #VoiceForBharat Edition
 
-Build a production voice AI agent in 5 minutes. Powered by the fastest TTS on the market - swap the system prompt to build anything from customer support to language tutors.
+A voice AI assistant designed to help Indian farmers with crop management, soil health, weather advisories, and farming techniques. Built for the **Farm & Field** track of the **10 Days of Voice Agents (#VoiceForBharat)** challenge.
+
+This agent connects speech-to-text (STT), a large language model (LLM), and text-to-speech (TTS) around a WebRTC transport layer to enable low-latency, natural, voice-based interactions.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Murf Falcon](https://img.shields.io/badge/TTS-Murf%20Falcon-6366F1)](https://murf.ai/api/docs/text-to-speech/streaming) [![LiveKit](https://img.shields.io/badge/Transport-LiveKit-002cf2)](https://docs.livekit.io) [![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?logo=typescript&logoColor=white)](https://www.typescriptlang.org/) [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 
 ---
 
-## Why Murf Falcon
+## Performance Metrics (Day 1 Benchmark)
 
-- **55ms model latency** - fastest production TTS
-- **130ms time-to-first-audio** across 10+ global regions
-- **$0.01/1000 characters** - up to 10x cheaper than alternatives
-- **150+ voices** across 35+ languages
-- **99.38% pronunciation accuracy**
+*   **Model Latency (Murf Falcon)**: ~55ms
+*   **Time-to-First-Audio (TTFB)**: logged at **137ms – 263ms** average
+*   **STT Provider**: Deepgram Nova-3
+*   **LLM Provider**: Google Gemini (`gemini-3.5-flash-lite`)
+*   **TTS Provider**: Murf Falcon (Indian English Voice `Anisha`)
+
 
 ---
 
@@ -168,33 +171,17 @@ If the agent doesn't connect, double-check that both services point to the same 
 
 ---
 
-## Change the Use Case
+## Current Active Configuration: Farm & Field Track
 
-The default system prompt makes this a **customer support agent**. You can change the agent’s behavior by editing the prompt.
+The agent is configured as a friendly agricultural expert to assist Indian farmers with their crop management, soil health, weather inquiries, and farming techniques.
 
-**Where the prompt lives:** `backend/src/agent.py`- the `SYSTEM_PROMPT` constant (near the top of the file, after the imports). Change that string to change what your voice agent does.
+**Where the prompt lives:** `backend/src/agent.py` — the `SYSTEM_PROMPT` constant.
 
-### Example prompts (copy-paste)
-
-**Customer Support (default):**
+### The Active System Prompt
 
 ```
-You are a friendly and efficient customer support agent for a tech company. Help users with account issues, billing questions, and product troubleshooting. Be concise, empathetic, and solution-oriented. If you don't know something, say so honestly and offer to escalate.
+You are a knowledgeable and friendly agricultural expert assisting Indian farmers with their crop management, soil health, weather inquiries, and farming techniques. Provide practical, easy-to-follow advice. Be warm, supportive, and speak in a clear and conversational manner. Keep your responses very concise (one or two short sentences) so they are easy to listen to. Do not use any markdown formatting, bullet points, or list structures.
 ```
-
-**Language Tutor:**
-
-```
-You are a patient and encouraging language tutor helping the user practice conversational Spanish. Speak primarily in Spanish but switch to English to explain grammar or vocabulary when needed. Correct mistakes gently and suggest better phrasing. Keep conversations natural and fun.
-```
-
-**AI Receptionist:**
-
-```
-You are a professional receptionist for a medical clinic. Help callers schedule appointments, answer questions about office hours and services, and take messages for doctors. Be warm but efficient. Ask for the caller's name and reason for calling upfront.
-```
-
-See the Configuration section below for voice, STT, and LLM options.
 
 ---
 
