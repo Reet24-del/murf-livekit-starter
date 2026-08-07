@@ -8,22 +8,47 @@ from livekit.agents import (
     AgentSession,
     JobContext,
     JobProcess,
+    UserStateChangedEvent,
     cli,
-    inference,
-    tokenize,
     room_io,
+    tokenize,
 )
-from livekit.plugins import murf, silero, google, deepgram, noise_cancellation
+from livekit.plugins import deepgram, google, murf, noise_cancellation, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 logger = logging.getLogger("agent")
 
 load_dotenv(".env.local")
 
-# Change this prompt to change what your voice agent does.
-# See README.md for example prompts (customer support, language tutor, receptionist).
-SYSTEM_PROMPT = """You are a knowledgeable and friendly agricultural expert assisting Indian farmers with their crop management, soil health, weather inquiries, and farming techniques. Provide practical, easy-to-follow advice. Be warm, supportive, and speak in a clear and conversational manner. Keep your responses very concise (one or two short sentences) so they are easy to listen to. Do not use any markdown formatting, bullet points, or list structures."""
+# Structured prompt for Kisan Sahayak Voice Assistant
+SYSTEM_PROMPT = """
+IDENTITY:
+You are Kisan Sahayak, a friendly and experienced agricultural expert helping Indian farmers. You work for the Krishi Sahayata Center.
 
+OBJECTIVES:
+- Understand the farmer's agricultural query (crop selection, soil health, pests, weather).
+- Provide practical, easy-to-follow, and direct advice.
+- Escalate complex queries warmly to human experts or local authorities.
+
+KNOWLEDGE LIMITS:
+- You know about Indian crops, soil care, fertilizers, organic pest control, and regional weather patterns.
+- Do NOT make up market prices, subsidy details, or long-term weather predictions (more than 7 days ahead). If asked, explain that you do not have current data for that.
+- Do NOT answer questions outside of agriculture, farming, and local weather.
+
+LANGUAGE:
+- Mirror the user's language mix (Hinglish, code-mixed Hindi and English, pure Hindi, or pure English).
+- Speak in a warm, respectful, and polite register. Use terms like "bhaiya" or "aap" to show respect.
+
+GUARDRAILS:
+- Refuse out-of-scope queries (general knowledge, political topics, sports, coding, entertainment) politely: "Main keval kheti aur mausam se jude sawalon ke jawab de sakta hoon."
+- Never claim to state current live crop market prices as fact. If asked, explain that market rates fluctuate daily and recommend checking local mandis.
+- If a query is outside your knowledge limits, use this escalation path: "Iske liye main aapko Kisan Call Centre ke toll-free number 1800-180-1551 par baat karne ya apne sthaniy Krishi Vigyan Kendra (KVK) officer se sampark karne ki salah dunga."
+
+STYLE:
+- Keep your spoken responses very short (maximum 1 to 2 simple sentences, under 25 words).
+- Speak slowly and clearly.
+- Never use markdown formatting, bullet points, or list structures in your text output (e.g. no bold text, no asterisks, no dashes, no numbers). Write plain text only.
+"""
 
 
 class Assistant(Agent):
@@ -74,16 +99,16 @@ async def my_agent(ctx: JobContext):
         # A Large Language Model (LLM) is your agent's brain, processing user input and generating a response
         # See all available models at https://docs.livekit.io/agents/models/llm/
         llm=google.LLM(
-                model="gemini-3.5-flash-lite",
-            ),
+            model="gemini-3.5-flash-lite",
+        ),
         # Text-to-speech (TTS) is your agent's voice, turning the LLM's text into speech that the user can hear
         # See all available models as well as voice selections at https://docs.livekit.io/agents/models/tts/
         tts=murf.TTS(
-                voice="Anisha", 
-                style="Conversation",
-                tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
-                text_pacing=True
-            ),
+            voice="Anisha",
+            style="Conversation",
+            tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
+            text_pacing=True,
+        ),
         # VAD and turn detection are used to determine when the user is speaking and when the agent should respond
         # See more at https://docs.livekit.io/agents/build/turns
         turn_detection=MultilingualModel(),
@@ -91,25 +116,52 @@ async def my_agent(ctx: JobContext):
         # allow the LLM to generate a response while waiting for the end of turn
         # See more at https://docs.livekit.io/agents/build/audio/#preemptive-generation
         preemptive_generation=True,
+        # Timeout user state to 'away' after 7 seconds of complete silence
+        user_away_timeout=7.0,
     )
 
-    # To use a realtime model instead of a voice pipeline, use the following session setup instead.
-    # (Note: This is for the OpenAI Realtime API. For other providers, see https://docs.livekit.io/agents/models/realtime/))
-    # 1. Install livekit-agents[openai]
-    # 2. Set OPENAI_API_KEY in .env.local
-    # 3. Add `from livekit.plugins import openai` to the top of this file
-    # 4. Use the following session setup instead of the version above
-    # session = AgentSession(
-    #     llm=openai.realtime.RealtimeModel(voice="marin")
-    # )
+    silence_failures = 0
 
-    # # Add a virtual avatar to the session, if desired
-    # # For other providers, see https://docs.livekit.io/agents/models/avatar/
-    # avatar = hedra.AvatarSession(
-    #   avatar_id="...",  # See https://docs.livekit.io/agents/models/avatar/plugins/hedra
-    # )
-    # # Start the avatar and wait for it to join
-    # await avatar.start(session, room=ctx.room)
+    @session.on("user_state_changed")
+    def on_user_state_changed(ev: UserStateChangedEvent):
+        nonlocal silence_failures
+        logger.info(f"User state changed: {ev.old_state} -> {ev.new_state}")
+        if ev.new_state == "away":
+            silence_failures += 1
+            if silence_failures == 1:
+                logger.info("First silence timeout. Speaking re-prompt.")
+
+                async def re_prompt():
+                    try:
+                        await session.say(
+                            "Bhaiya, kya aap wahan hain? Kheti se juda koi sawal hai toh poonchhiye."
+                        )
+                    except Exception as e:
+                        logger.error(f"Error speaking re-prompt: {e}")
+
+                ctx.proc.loop.create_task(re_prompt())
+            elif silence_failures >= 2:
+                logger.info(
+                    "Second silence timeout. Speaking departure and disconnecting."
+                )
+
+                async def close_session():
+                    try:
+                        await session.say(
+                            "Aapki taraf se koi jawab nahi mila. Main call band kar raha hoon. Dhanyawad."
+                        )
+                        import asyncio
+
+                        await asyncio.sleep(4.5)
+                        await ctx.disconnect()
+                    except Exception as e:
+                        logger.error(f"Error during graceful close: {e}")
+                        await ctx.disconnect()
+
+                ctx.proc.loop.create_task(close_session())
+        elif ev.new_state == "speaking":
+            # Reset failures if user speaks
+            silence_failures = 0
 
     # Start the session, which initializes the voice pipeline and warms up the models
     await session.start(
@@ -129,6 +181,11 @@ async def my_agent(ctx: JobContext):
 
     # Join the room and connect to the user
     await ctx.connect()
+
+    # Speak the initial greeting
+    await session.say(
+        "Namaskar! Main aapka Kisan Sahayak hoon. Main aapko fasal prabandhan, mitti ki sehat, aur mausam ki jankari de sakta hoon. Aaj main aapki kya sahayata karoon?"
+    )
 
 
 if __name__ == "__main__":
