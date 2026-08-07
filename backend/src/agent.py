@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from dotenv import load_dotenv
@@ -36,14 +37,15 @@ KNOWLEDGE LIMITS:
 - Do NOT answer questions outside of agriculture, farming, and local weather.
 
 LANGUAGE:
-- Mirror the user's language mix (Hinglish, code-mixed Hindi and English, pure Hindi, or pure English).
-- Speak in a warm, respectful, and polite register. Use terms like "bhaiya" or "aap" to show respect.
-- GENDER: You are a female assistant speaking in a woman's voice. When speaking in Hindi or Hinglish, always use feminine verb endings and pronouns (e.g., use "sakti hoon" instead of "sakta hoon", "bol rahi hoon" instead of "bol raha hoon", "karungi" instead of "karunga").
+- Mirror the user's language mix.
+- SCRIPT REQUIREMENT: If the user speaks Hindi or Hinglish, you MUST respond strictly using Devanagari script (Hindi characters, e.g. नमस्कार, टमाटर, मिट्टी). Never write Hindi or Hinglish words using Roman/English letters (do NOT write "Namaskar", "tamatar", etc.). If speaking in English, use standard English letters.
+- Speak in a warm, respectful, and polite register. Use terms like "भैया" (bhaiya) or "आप" (aap) to show respect.
+- GENDER: You are a female assistant speaking in a woman's voice. When speaking in Hindi, always use feminine verb endings and pronouns (e.g., use "सकती हूँ" instead of "सकता हूँ", "बोल रही हूँ" instead of "बोल रहा हूँ", "करूँगी" instead of "करूँगा").
 
 GUARDRAILS:
-- Refuse out-of-scope queries (general knowledge, political topics, sports, coding, entertainment) politely: "Main keval kheti aur mausam se jude sawalon ke jawab de sakta hoon."
+- Refuse out-of-scope queries (general knowledge, political topics, sports, coding, entertainment) politely in Devanagari script: "मैं केवल खेती और मौसम से जुड़े सवालों के जवाब दे सकती हूँ।"
 - Never claim to state current live crop market prices as fact. If asked, explain that market rates fluctuate daily and recommend checking local mandis.
-- If a query is outside your knowledge limits, use this escalation path: "Iske liye main aapko Kisan Call Centre ke toll-free number 1800-180-1551 par baat karne ya apne sthaniy Krishi Vigyan Kendra (KVK) officer se sampark karne ki salah dunga."
+- If a query is outside your knowledge limits, use this Devanagari escalation path: "इसके लिए मैं आपको किसान कॉल सेंटर के टोल-फ्री नंबर 1800-180-1551 पर बात करने या अपने स्थानीय कृषि विज्ञान केंद्र (KVK) अधिकारी से संपर्क करने की सलाह दूँगी।"
 
 STYLE:
 - Keep your spoken responses very short (maximum 1 to 2 simple sentences, under 25 words).
@@ -105,7 +107,8 @@ async def my_agent(ctx: JobContext):
         # Text-to-speech (TTS) is your agent's voice, turning the LLM's text into speech that the user can hear
         # See all available models as well as voice selections at https://docs.livekit.io/agents/models/tts/
         tts=murf.TTS(
-            voice="Khyati",
+            voice="hi-IN-sunaina",
+            locale="hi-IN",
             style="Conversation",
             tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
             text_pacing=True,
@@ -122,6 +125,7 @@ async def my_agent(ctx: JobContext):
     )
 
     silence_failures = 0
+    silence_tasks = set()
 
     @session.on("user_state_changed")
     def on_user_state_changed(ev: UserStateChangedEvent):
@@ -135,12 +139,14 @@ async def my_agent(ctx: JobContext):
                 async def re_prompt():
                     try:
                         await session.say(
-                            "Bhaiya, kya aap wahan hain? Kheti se juda koi sawal hai toh poonchhiye."
+                            "भैया, क्या आप वहाँ हैं? खेती से जुड़ा कोई सवाल है तो पूछिए।"
                         )
                     except Exception as e:
                         logger.error(f"Error speaking re-prompt: {e}")
 
-                ctx.proc.loop.create_task(re_prompt())
+                t1 = asyncio.create_task(re_prompt())
+                silence_tasks.add(t1)
+                t1.add_done_callback(silence_tasks.discard)
             elif silence_failures >= 2:
                 logger.info(
                     "Second silence timeout. Speaking departure and disconnecting."
@@ -149,17 +155,17 @@ async def my_agent(ctx: JobContext):
                 async def close_session():
                     try:
                         await session.say(
-                            "Aapki taraf se koi jawab nahi mila. Main call band kar raha hoon. Dhanyawad."
+                            "आपकी तरफ से कोई जवाब नहीं मिला। मैं कॉल बंद कर रही हूँ। धन्यवाद।"
                         )
-                        import asyncio
-
                         await asyncio.sleep(4.5)
                         await ctx.disconnect()
                     except Exception as e:
                         logger.error(f"Error during graceful close: {e}")
                         await ctx.disconnect()
 
-                ctx.proc.loop.create_task(close_session())
+                t2 = asyncio.create_task(close_session())
+                silence_tasks.add(t2)
+                t2.add_done_callback(silence_tasks.discard)
         elif ev.new_state == "speaking":
             # Reset failures if user speaks
             silence_failures = 0
@@ -185,7 +191,7 @@ async def my_agent(ctx: JobContext):
 
     # Speak the initial greeting
     await session.say(
-        "Namaskar! Main aapki Kisan Sahayak hoon. Main aapko fasal prabandhan, mitti ki sehat, aur mausam ki jankari de sakti hoon. Aaj main aapki kya sahayata karoon?"
+        "नमस्कार! मैं आपकी किसान सहायक हूँ। मैं आपको फसल प्रबंधन, मिट्टी की सेहत, और मौसम की जानकारी दे सकती हूँ। आज मैं आपकी क्या सहायता करूँ?"
     )
 
 
