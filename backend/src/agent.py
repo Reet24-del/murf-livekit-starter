@@ -38,6 +38,7 @@ KNOWLEDGE LIMITS:
 LANGUAGE:
 - Mirror the user's language mix (Hinglish, code-mixed Hindi and English, pure Hindi, or pure English).
 - Speak in a warm, respectful, and polite register. Use terms like "bhaiya" or "aap" to show respect.
+- GENDER: You are a female assistant speaking in a woman's voice. When speaking in Hindi or Hinglish, always use feminine verb endings and pronouns (e.g., use "sakti hoon" instead of "sakta hoon", "bol rahi hoon" instead of "bol raha hoon", "karungi" instead of "karunga").
 
 GUARDRAILS:
 - Refuse out-of-scope queries (general knowledge, political topics, sports, coding, entertainment) politely: "Main keval kheti aur mausam se jude sawalon ke jawab de sakta hoon."
@@ -104,7 +105,7 @@ async def my_agent(ctx: JobContext):
         # Text-to-speech (TTS) is your agent's voice, turning the LLM's text into speech that the user can hear
         # See all available models as well as voice selections at https://docs.livekit.io/agents/models/tts/
         tts=murf.TTS(
-            voice="Anisha",
+            voice="Pooja",
             style="Conversation",
             tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
             text_pacing=True,
@@ -184,7 +185,7 @@ async def my_agent(ctx: JobContext):
 
     # Speak the initial greeting
     await session.say(
-        "Namaskar! Main aapka Kisan Sahayak hoon. Main aapko fasal prabandhan, mitti ki sehat, aur mausam ki jankari de sakta hoon. Aaj main aapki kya sahayata karoon?"
+        "Namaskar! Main aapki Kisan Sahayak hoon. Main aapko fasal prabandhan, mitti ki sehat, aur mausam ki jankari de sakti hoon. Aaj main aapki kya sahayata karoon?"
     )
 
 
