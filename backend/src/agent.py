@@ -140,7 +140,7 @@ async def my_agent(ctx: JobContext):
                 async def re_prompt():
                     try:
                         await session.say(
-                            "भैया, क्या आप वहाँ हैं? खेती से जुड़ा कोई सवाल है तो पूछिए।"
+                            "जी, क्या आप वहाँ हैं? खेती से जुड़ा कोई सवाल है तो पूछिए।"
                         )
                     except Exception as e:
                         logger.error(f"Error speaking re-prompt: {e}")
