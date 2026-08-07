@@ -39,25 +39,25 @@ export function KisanSahayakView({ appConfig }: KisanSahayakViewProps) {
       color: '#4C6656',
       label: session.isConnected ? 'Sahayak is Idle' : 'Tap to talk',
       hi: session.isConnected ? 'सहायक शांत है' : 'बोलने के लिए दबाएं',
-      hint: session.isConnected ? 'Connected · Active' : 'Tap to talk · टैप करें',
+      hint: session.isConnected ? 'Connected · Hands-free speaking active' : 'Tap to talk · टैप करें',
     },
     listening: {
       color: '#E8A93B',
       label: 'Listening…',
       hi: 'सुन रहा हूँ…',
-      hint: 'Listening — speak now',
+      hint: 'Listening · Speak naturally (do not click)',
     },
     thinking: {
       color: '#C97B3D',
       label: 'Thinking…',
       hi: 'सोच रहा हूँ…',
-      hint: 'Finding the best advice',
+      hint: 'Finding the best advice · Please wait',
     },
     speaking: {
       color: '#7FB35C',
       label: 'Speaking…',
       hi: 'बोल रहा हूँ…',
-      hint: 'Sahayak is answering',
+      hint: 'Sahayak is answering · Do not click',
     },
   };
 
@@ -122,9 +122,7 @@ export function KisanSahayakView({ appConfig }: KisanSahayakViewProps) {
 
   // Handle talk button click
   const handleTalkClick = () => {
-    if (session.isConnected) {
-      session.end?.();
-    } else {
+    if (!session.isConnected) {
       session.start?.();
     }
   };
@@ -699,6 +697,30 @@ export function KisanSahayakView({ appConfig }: KisanSahayakViewProps) {
             <div className="talk-hint" id="talkHint">
               {activeState.hint}
             </div>
+
+            {session.isConnected && (
+              <button
+                className="end-call-btn"
+                onClick={() => session.end?.()}
+                style={{
+                  marginTop: '4px',
+                  background: 'rgba(239, 68, 68, 0.15)',
+                  color: '#ef4444',
+                  border: 'none',
+                  borderRadius: '999px',
+                  padding: '6px 14px',
+                  fontSize: '11px',
+                  fontFamily: 'var(--font-mono)',
+                  letterSpacing: '0.05em',
+                  cursor: 'pointer',
+                  transition: 'background 0.2s ease',
+                }}
+                onMouseOver={(e) => (e.currentTarget.style.background = 'rgba(239, 68, 68, 0.25)')}
+                onMouseOut={(e) => (e.currentTarget.style.background = 'rgba(239, 68, 68, 0.15)')}
+              >
+                DISCONNECT CALL
+              </button>
+            )}
 
             <div className="lang-toggle">
               <button
