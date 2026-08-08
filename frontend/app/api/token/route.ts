@@ -30,6 +30,9 @@ export async function POST(req: Request) {
       throw new Error('LIVEKIT_API_SECRET is not defined');
     }
 
+    const { searchParams } = new URL(req.url);
+    const location = searchParams.get('location') || 'Lucknow, Uttar Pradesh';
+
     // Parse room config from request body (if provided).
     const body = await req.json().catch(() => ({}));
     let roomConfig: RoomConfiguration | undefined;
@@ -50,7 +53,12 @@ export async function POST(req: Request) {
     const roomName = `voice_assistant_room_${Math.floor(Math.random() * 10_000)}`;
 
     const participantToken = await createParticipantToken(
-      { identity: participantIdentity, name: participantName },
+      {
+        identity: participantIdentity,
+        name: participantName,
+        metadata: JSON.stringify({ location }),
+        attributes: { location },
+      },
       roomName,
       roomConfig
     );

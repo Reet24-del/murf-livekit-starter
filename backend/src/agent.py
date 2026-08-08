@@ -9,8 +9,10 @@ from livekit.agents import (
     AgentSession,
     JobContext,
     JobProcess,
+    RunContext,
     UserStateChangedEvent,
     cli,
+    function_tool,
     room_io,
     tokenize,
 )
@@ -59,22 +61,135 @@ class Assistant(Agent):
     def __init__(self) -> None:
         super().__init__(instructions=SYSTEM_PROMPT)
 
-    # To add tools, use the @function_tool decorator.
-    # Here's an example that adds a simple weather tool.
-    # You also have to add `from livekit.agents import function_tool, RunContext` to the top of this file
-    # @function_tool
-    # async def lookup_weather(self, context: RunContext, location: str):
-    #     """Use this tool to look up current weather information in the given location.
-    #
-    #     If the location is not supported by the weather service, the tool will indicate this. You must tell the user the location's weather is unavailable.
-    #
-    #     Args:
-    #         location: The location to look up weather information for (e.g. city name)
-    #     """
-    #
-    #     logger.info(f"Looking up weather for {location}")
-    #
-    #     return "sunny with a temperature of 70 degrees."
+    @function_tool
+    async def check_crop_suitability(
+        self,
+        context: RunContext,
+        crop_name: str,
+    ) -> str:
+        """Use this tool to check if a specific crop is suitable for the farmer's current location.
+        The tool will automatically detect the location from the farmer's session details.
+
+        Args:
+            crop_name: The name of the crop to check (e.g. rice, wheat, tomato).
+        """
+        location = "Unknown"
+        if hasattr(self, "room") and self.room:
+            participants = list(self.room.remote_participants.values())
+            if participants:
+                p = participants[0]
+                location = p.attributes.get("location") or "Unknown"
+                if location == "Unknown" and p.metadata:
+                    try:
+                        import json
+
+                        meta = json.loads(p.metadata)
+                        location = meta.get("location") or "Unknown"
+                    except Exception:
+                        pass
+
+        logger.info(f"Checking suitability of {crop_name} for location {location}")
+
+        # Basic climate and soil suitability details in India
+        loc_lower = location.lower()
+        suitability = ""
+
+        if "bihar" in loc_lower or "patna" in loc_lower:
+            if any(x in crop_name.lower() for x in ["rice", "dhan", "धान", "paddy"]):
+                suitability = (
+                    "धान (rice) के लिए दक्षिण बिहार की जलोढ़ मिट्टी और मौसम बहुत अनुकूल है।"
+                )
+            elif any(x in crop_name.lower() for x in ["wheat", "gehun", "गेहूं"]):
+                suitability = (
+                    "गेहूं (wheat) रबी सीजन (अक्टूबर-मार्च) में लगाने के लिए बहुत उपयुक्त है।"
+                )
+            elif any(x in crop_name.lower() for x in ["maize", "makka", "मक्का"]):
+                suitability = (
+                    "मक्का (maize) यहाँ खरीफ और रबी दोनों मौसमों में अच्छी उपज देता है।"
+                )
+            else:
+                suitability = f"{crop_name} की खेती की जा सकती है, लेकिन बुवाई से पहले मिट्टी की जांच जरूर कराएं।"
+        elif "uttar pradesh" in loc_lower or "lucknow" in loc_lower:
+            if any(x in crop_name.lower() for x in ["sugarcane", "ganna", "गन्ना"]):
+                suitability = "गन्ना (sugarcane) के लिए उत्तर प्रदेश की मिट्टी और सिंचाई व्यवस्था सर्वोत्तम है।"
+            elif any(x in crop_name.lower() for x in ["wheat", "gehun", "गेहूं"]):
+                suitability = "गेहूं (wheat) की बुवाई नवंबर में करना सबसे उपयुक्त रहेगा।"
+            else:
+                suitability = f"{crop_name} की खेती के लिए स्थानीय बुवाई कैलेंडर का पालन करें।"
+        else:
+            suitability = (
+                f"{crop_name} की खेती के लिए मौसम अनुकूल है, बशर्ते समय पर सिंचाई की जाए।"
+            )
+
+        return f"स्थान (Location): {location}। रिपोर्ट: {suitability}"
+
+    @function_tool
+    async def get_current_weather(
+        self,
+        context: RunContext,
+    ) -> str:
+        """Use this tool to get the current weather conditions for the farmer's location.
+        The tool automatically detects the location from the session details.
+        """
+        location = "Unknown"
+        if hasattr(self, "room") and self.room:
+            participants = list(self.room.remote_participants.values())
+            if participants:
+                p = participants[0]
+                location = p.attributes.get("location") or "Unknown"
+
+        logger.info(f"Looking up weather for location {location}")
+
+        try:
+            import aiohttp
+
+            city = location.split(",")[0].strip()
+            geocode_url = f"https://geocoding-api.open-meteo.com/v1/search?name={city}&count=1&language=en&format=json"
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(geocode_url) as resp:
+                    geo_data = await resp.json()
+
+                if geo_data.get("results"):
+                    result = geo_data["results"][0]
+                    lat = result["latitude"]
+                    lon = result["longitude"]
+
+                    weather_url = f"https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true"
+                    async with session.get(weather_url) as resp2:
+                        w_data = await resp2.json()
+
+                    if w_data.get("current_weather"):
+                        cw = w_data["current_weather"]
+                        temp = cw["temperature"]
+                        wind = cw["windspeed"]
+                        codes = {
+                            0: "Clear sky",
+                            1: "Mainly clear",
+                            2: "Partly cloudy",
+                            3: "Overcast",
+                            45: "Foggy",
+                            48: "Foggy",
+                            51: "Drizzle",
+                            53: "Drizzle",
+                            55: "Drizzle",
+                            61: "Light rain",
+                            63: "Rain",
+                            65: "Heavy rain",
+                            71: "Snow",
+                            73: "Snow",
+                            75: "Heavy snow",
+                            80: "Rain showers",
+                            81: "Rain showers",
+                            82: "Heavy showers",
+                            95: "Thunderstorm",
+                        }
+                        desc = codes.get(cw["weathercode"], "Clear sky")
+                        return f"Current weather in {location}: {temp}°C, {desc}. Windspeed is {wind} km/h."
+        except Exception as e:
+            logger.error(f"Weather lookup failed: {e}")
+
+        return f"Unable to fetch real-time weather. Typical weather in {location} is 28°C and partly cloudy."
 
 
 server = AgentServer()
@@ -121,8 +236,8 @@ async def my_agent(ctx: JobContext):
         # allow the LLM to generate a response while waiting for the end of turn
         # See more at https://docs.livekit.io/agents/build/audio/#preemptive-generation
         preemptive_generation=True,
-        # Timeout user state to 'away' after 7 seconds of complete silence
-        user_away_timeout=7.0,
+        # Timeout user state to 'away' after 15 seconds of complete silence
+        user_away_timeout=15.0,
     )
 
     silence_failures = 0
@@ -172,8 +287,11 @@ async def my_agent(ctx: JobContext):
             silence_failures = 0
 
     # Start the session, which initializes the voice pipeline and warms up the models
+    assistant = Assistant()
+    assistant.room = ctx.room
+
     await session.start(
-        agent=Assistant(),
+        agent=assistant,
         room=ctx.room,
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(

@@ -28,9 +28,15 @@ interface AppProps {
 
 export function App({ appConfig }: AppProps) {
   const tokenSource = useMemo(() => {
-    return typeof process.env.NEXT_PUBLIC_CONN_DETAILS_ENDPOINT === 'string'
-      ? getSandboxTokenSource(appConfig)
-      : TokenSource.endpoint('/api/token');
+    if (typeof process.env.NEXT_PUBLIC_CONN_DETAILS_ENDPOINT === 'string') {
+      return getSandboxTokenSource(appConfig);
+    }
+    const loc =
+      typeof window !== 'undefined'
+        ? localStorage.getItem('detected_location') || 'Lucknow, Uttar Pradesh'
+        : 'Lucknow, Uttar Pradesh';
+    const encodedLoc = encodeURIComponent(loc);
+    return TokenSource.endpoint(`/api/token?location=${encodedLoc}`);
   }, [appConfig]);
 
   const session = useSession(
@@ -39,7 +45,7 @@ export function App({ appConfig }: AppProps) {
   );
 
   return (
-    <AgentSessionProvider session={session}>
+    <AgentSessionProvider session={session} volume={1.0}>
       <AppSetup />
       <main className="grid h-svh grid-cols-1 place-content-center">
         <ViewController appConfig={appConfig} />
