@@ -16,6 +16,83 @@ This agent connects speech-to-text (STT), a large language model (LLM), and text
 *   **LLM Provider**: Google Gemini (`gemini-3.5-flash-lite`)
 *   **TTS Provider**: Murf Falcon (Indian English Voice `Anisha`)
 
+## Day 5: Live District Weather Tool
+
+Kisan Sahayak includes a `get_district_weather` function tool backed by the live [Open-Meteo Geocoding API](https://open-meteo.com/en/docs/geocoding-api) and [Forecast API](https://open-meteo.com/en/docs). This is live external data, not a hand-built local dataset.
+
+The tool resolves an Indian district and returns:
+
+- Current temperature, weather condition, and wind speed
+- Today's minimum and maximum temperature
+- Today's maximum probability of rain
+- The local observation time and forecast date
+
+If the farmer does not name a district, the tool first reuses their saved Day 4 district and then checks their LiveKit participant location. Requests time out after eight seconds. If Open-Meteo is unavailable, the agent explicitly says live weather is unavailable and does not invent a temperature or forecast.
+
+Try this after saving a district in the caller profile:
+
+> “क्या आज कपास पर दवा छिड़कने के लिए मौसम ठीक है?”
+
+Or name the location directly:
+
+> “What is today's rain chance in Wardha?”
+
+## Day 6: Outbound Rain-Advisory Calls
+
+Kisan Sahayak has a separate `outbound-agent` worker that calls a user-controlled [Linphone](https://www.linphone.org/) account through LiveKit SIP. It immediately identifies itself, explains that it is calling with a rain and crop-safety advisory, and tells the recipient how to stop future calls. The advisory uses live Open-Meteo data fetched during the call and spoken with Murf Falcon using the Anisha voice.
+
+The workflow includes:
+
+- English openings and replies for English callers
+- Hindi written only in Devanagari, including replies to Roman Hindi
+- Persistent opt-out storage in SQLite
+- Busy, declined, timeout, voicemail, and missing-data handling
+- Consent confirmation and 08:00–20:00 IST calling hours before dispatch
+
+### One-time Linphone setup
+
+1. Create a free account at [subscribe.linphone.org](https://subscribe.linphone.org/register/email) and note only the username portion of `sip:USERNAME@sip.linphone.org`.
+2. Install the Linphone phone app, sign in, allow microphone access, then turn **Settings → Calls → Advanced calls settings → Media encryption mandatory** off.
+3. In **LiveKit Cloud → Telephony → SIP Trunks**, create an outbound trunk using [`backend/src/telephony/outbound/linphone-trunk.example.json`](backend/src/telephony/outbound/linphone-trunk.example.json). Replace `YOUR_LINPHONE_USERNAME`, save the trunk, and copy its `ST_...` ID.
+4. Add the trunk ID to `backend/.env.local`:
+
+```dotenv
+LIVEKIT_SIP_OUTBOUND_TRUNK_ID=ST_your_real_trunk_id
+```
+
+### Start and test the outbound workflow
+
+From `backend/`, start the dedicated worker:
+
+```bash
+uv run python -m telephony.outbound.agent dev
+```
+
+In another terminal, validate everything without contacting LiveKit:
+
+```bash
+uv run python -m telephony.outbound.dial \
+  --to YOUR_LINPHONE_USERNAME \
+  --district Lucknow \
+  --crop tomato \
+  --language en \
+  --consent-confirmed \
+  --dry-run
+```
+
+Remove `--dry-run` to make the controlled call:
+
+```bash
+uv run python -m telephony.outbound.dial \
+  --to YOUR_LINPHONE_USERNAME \
+  --district Lucknow \
+  --crop tomato \
+  --language hi \
+  --consent-confirmed
+```
+
+The destination must belong to you or to a recipient who agreed to the call. The CLI blocks saved opt-outs and calls outside 08:00–20:00 IST; `--override-quiet-hours` exists only for a controlled challenge demonstration. To show graceful live-data failure in the video, make a controlled call with `--district "Not a district"`; the agent says that live weather is unavailable instead of inventing values.
+
 
 ---
 
@@ -74,6 +151,7 @@ Create `.env.local` in both `backend/` and `frontend/` (copy from `.env.example`
 | `LIVEKIT_URL`                          | LiveKit Cloud dashboard                                | Yes      |
 | `LIVEKIT_API_KEY`                      | LiveKit Cloud dashboard                                | Yes      |
 | `LIVEKIT_API_SECRET`                   | LiveKit Cloud dashboard                                | Yes      |
+| `LIVEKIT_SIP_OUTBOUND_TRUNK_ID`        | LiveKit Cloud → Telephony → SIP Trunks                  | Day 6    |
 | `MURF_API_KEY`                         | [murf.ai/api/dashboard](https://murf.ai/api/dashboard) | Yes      |
 | `DEEPGRAM_API_KEY`                     | [deepgram.com](https://deepgram.com)                   | Yes      |
 | `GOOGLE_API_KEY` (or `OPENAI_API_KEY`) | Depends on LLM choice                                  | Yes      |
@@ -196,7 +274,9 @@ KNOWLEDGE LIMITS:
 LANGUAGE:
 - STRICT LANGUAGE MATCHING: You must instantly adapt to the language of the user's latest turn. If the user switches language in between, you MUST switch with them:
   - If the user speaks to you in English, you MUST reply strictly in English (using standard English text).
-  - If the user speaks to you in Hindi or Hinglish, you MUST reply strictly in Hindi using Devanagari script (Hindi characters, e.g. नमस्कार, टमाटर, मिट्टी). Never write Hindi or Hinglish words using Roman/English letters (do NOT write "Namaskar" or "tamatar").
+  - If the user speaks Hindi in Devanagari, reply in Hindi using Devanagari.
+  - If the user speaks Hinglish in Roman script, reply naturally in Roman-script Hinglish and preserve exact numbers, dates, and tool results.
+  - If the latest turn is too short or ambiguous to classify safely, mirror its script instead of forcing a different language.
 - Speak in a warm, respectful, and polite register. Always use gender-neutral respectful terms like "जी" (ji) or "आप" (aap). NEVER assume the user's gender and NEVER use masculine terms like "भैया" (bhaiya) or "brother" to address the user.
 - GENDER: You are a female assistant speaking in a woman's voice. When speaking in Hindi, always use feminine verb endings and pronouns (e.g., use "सकती हूँ" instead of "सकता हूँ", "बोल रही हूँ" instead of "बोल रहा हूँ", "करूँगी" instead of "करूँगा").
 
@@ -213,11 +293,11 @@ STYLE:
 
 ---
 
-## Day 3 Custom Frontend (Personalisation)
+## Immersive Voice Portal
 
-We have fully personalised the web frontend interface for Indian farmers, introducing custom layout transitions, responsive aesthetics, volume listeners, and microphone error handling:
+The frontend is a responsive, voice-first portal for Indian farmers with a neon agricultural visual system, live agent states, saved memory, and microphone error handling:
 
-1. **Branding & Theming**: Integrated custom fonts (Fraunces, Noto Sans Devanagari, Inter), background glows, and repeating linear-gradient "furrow lines" that represent an Indian farm field.
+1. **Branding & Theming**: A full-width dark interface combines emerald and violet energy effects, glass panels, a central reactive voice orb, and bilingual labels.
 2. **Five Agent States**:
    - **Ready**: Shows an inviting card greeting, sprout icon, and a single prominent **Start Call / बातचीत शुरू करें** button.
    - **Connecting**: Tells the user to wait while joining the room, showing a spinning and pulsing loader ring around the core.
@@ -225,11 +305,32 @@ We have fully personalised the web frontend interface for Indian farmers, introd
    - **Speaking**: Renders visualizer lines that vibrate in sync with the **agent's real-time voice stream volume** (using Murf Falcon's output). Displays a soft green speaking badge.
    - **Call ended**: Shows "Call Ended / कॉल समाप्त हो गई है", keeps the transcript visible for review, and shows a **Start Again / फिर से शुरू करें** button.
 3. **Microphone Permission error handling**: Intercepts `NotAllowedError` during call startup or queries page permissions on mount. If blocked, displays a prominent warning overlay explaining how to open the lock icon (🔒) in the browser address bar and enable microphone permissions, with a **Try Again** button.
-4. **Bilingual Support**: Offers a manual toggle for English and Hindi tags in the conversation history and transcript labels.
+4. **Automatic multilingual support**: The backend classifies every latest turn as English, Devanagari Hindi, Roman Hinglish, or ambiguous/mirror mode. There is no manual language toggle.
+5. **Memory and data surfaces**: The Saved memory panel reads the caller profile from the local SQLite-backed profile API. The weather panel prompts users to ask for live weather because spoken weather values come from the timestamped Open-Meteo tool rather than a decorative browser-side estimate.
+6. **Responsive website layout**: Desktop places weather, the voice stage, and memory side by side; tablet and mobile layouts stack the voice stage first and keep the primary call control full width and reachable.
 
 ---
 
 ## Configuration
+
+## Day 7: Human-help escalation
+
+Kisan Sahayak now knows when to stop and ask a human for help. It offers an escalation only for a serious or rapidly spreading crop problem (high urgency), or when requested market data is missing or stale (medium urgency). Normal farming, weather, time, and memory questions do not create requests.
+
+Before writing anything, the agent explains that it will share the caller identity and saved name when available, a short problem summary, checks performed, urgency, current language, and the `in_app` follow-up method. It asks for explicit consent in English, Hindi, or Hinglish. A refusal, ambiguous answer, missing identity, or consent value that does not match the caller's latest turn creates no request.
+
+Requests are real local SQLite records in `backend/memory.db`; this demo does not send them to an external help desk. Passwords, OTPs, PINs, account/card numbers, and long digit sequences are replaced with `[REDACTED]`, text is limited to 500 characters, and the full transcript is never stored. Repeated open or in-progress requests for the same caller and reason update the existing reference rather than creating duplicates.
+
+Open the staff dashboard at [http://localhost:3000/help-requests](http://localhost:3000/help-requests). Requests move through `open`, `in_progress`, and `resolved`. The reference format is `KS-YYYYMMDD-XXXX`; it is an honest tracking reference and does not promise an immediate response. If persistence fails, the agent recommends the Kisan Call Center at 1800-180-1551 or the local KVK.
+
+Demo prompts:
+
+- Serious path: “My tomato plants are suddenly black and half the field is dying.” Then: “Yes, create the request.”
+- Refusal path: repeat a severe problem, then say “No, do not share it.”
+- Normal path: “How often should I water tomatoes?”
+- Market path: “What is today's exact tomato mandi price?” Then consent after the agent offers human help.
+
+For the Day 7 video, show the agent identifying the serious case, explaining the fields, asking permission, returning a reference, and the row appearing at `/help-requests`. The LinkedIn post should mention Murf Falcon as the fastest TTS API, **10 Days of Voice Agents**, tag **Murf AI**, and include **#VoiceForBharat**.
 
 ### Murf voice
 

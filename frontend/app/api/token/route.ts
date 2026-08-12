@@ -32,6 +32,8 @@ export async function POST(req: Request) {
 
     const { searchParams } = new URL(req.url);
     const location = searchParams.get('location') || 'Lucknow, Uttar Pradesh';
+    const userId =
+      searchParams.get('user_id') || `voice_assistant_user_${Math.floor(Math.random() * 10_000)}`;
 
     // Parse room config from request body (if provided).
     const body = await req.json().catch(() => ({}));
@@ -49,15 +51,15 @@ export async function POST(req: Request) {
 
     // Generate participant token
     const participantName = 'user';
-    const participantIdentity = `voice_assistant_user_${Math.floor(Math.random() * 10_000)}`;
+    const participantIdentity = userId;
     const roomName = `voice_assistant_room_${Math.floor(Math.random() * 10_000)}`;
 
     const participantToken = await createParticipantToken(
       {
         identity: participantIdentity,
         name: participantName,
-        metadata: JSON.stringify({ location }),
-        attributes: { location },
+        metadata: JSON.stringify({ location, user_id: userId }),
+        attributes: { location, user_id: userId },
       },
       roomName,
       roomConfig

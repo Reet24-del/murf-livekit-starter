@@ -8,7 +8,56 @@ The Python backend for the Voice Agent Starter. It runs a real-time voice AI pip
 User speaks → [Deepgram STT] → text → [Gemini LLM] → response → [Murf Falcon TTS] → audio → User hears
 ```
 
+### Day 5 live weather data
+
+The agent's `get_district_weather` function calls the live [Open-Meteo Geocoding API](https://open-meteo.com/en/docs/geocoding-api) and [Forecast API](https://open-meteo.com/en/docs). The data is fetched at request time; it is not a local sample dataset. Successful results include the local observation time and forecast date along with current temperature, conditions, wind, today's temperature range, and maximum rain probability.
+
+The district is selected in this order: a location named in the current question, the caller's saved Day 4 district, then LiveKit participant location metadata. The request has an eight-second timeout. Unknown districts, timeouts, API errors, and incomplete responses produce a spoken “live data unavailable” message without fabricated weather values.
+
+Demo question: `What is today's rain chance in Wardha?`
+
 LiveKit handles the real-time audio transport. The agent connects to LiveKit as a participant, listens for user speech, and responds with synthesized audio.
+
+### Day 6 outbound calls with Linphone
+
+The separate `outbound-agent` worker places a consented LiveKit SIP call to a controlled Linphone account and delivers a live rain advisory. The first two sentences are fixed so the recipient immediately hears who is calling, why Kisan Sahayak is calling, and how to stop future calls. English stays English; Hindi and Roman Hindi receive Devanagari Hindi. Opt-outs are persisted in `memory.db` and checked before every later dispatch.
+
+Linphone and LiveKit SIP are live external services. Open-Meteo is queried at call time, so a weather outage produces a spoken unavailable-data fallback rather than a fabricated advisory.
+
+#### Configure Linphone and the SIP trunk
+
+1. Create a free [Linphone account](https://subscribe.linphone.org/register/email). Its SIP address looks like `sip:USERNAME@sip.linphone.org`.
+2. Install the Linphone phone app and sign in. Allow microphone access and turn **Settings → Calls → Advanced calls settings → Media encryption mandatory** off.
+3. Open **LiveKit Cloud → Telephony → SIP Trunks** and create an outbound trunk from `src/telephony/outbound/linphone-trunk.example.json`, replacing `YOUR_LINPHONE_USERNAME`.
+4. Copy the generated trunk ID into `.env.local`:
+
+```dotenv
+LIVEKIT_SIP_OUTBOUND_TRUNK_ID=ST_your_real_trunk_id
+```
+
+#### Run the worker and call your account
+
+Terminal one:
+
+```bash
+uv run python -m telephony.outbound.agent dev
+```
+
+Terminal two, safe validation only:
+
+```bash
+uv run python -m telephony.outbound.dial \
+  --to YOUR_LINPHONE_USERNAME \
+  --district Lucknow \
+  --crop tomato \
+  --language en \
+  --consent-confirmed \
+  --dry-run
+```
+
+After the dry run succeeds, remove `--dry-run` to call the Linphone app. Use `--language hi` for a Devanagari Hindi opening. Calls require `--consent-confirmed`, are blocked after opt-out, and are limited to 08:00–20:00 IST unless `--override-quiet-hours` is deliberately supplied for a controlled demo.
+
+For the failure-path recording, use `--district "Not a district"` on your own Linphone account. The call still connects, but the live-weather tool reports that current data is unavailable and does not guess. Busy, declined, unanswered, voicemail, and SIP errors are logged and shut down the call worker cleanly.
 
 ## Setup
 
@@ -32,6 +81,7 @@ Fill in your keys in `.env.local`:
 | `LIVEKIT_URL`        | [LiveKit Cloud](https://cloud.livekit.io/) → Settings     |
 | `LIVEKIT_API_KEY`    | [LiveKit Cloud](https://cloud.livekit.io/) → Settings     |
 | `LIVEKIT_API_SECRET` | [LiveKit Cloud](https://cloud.livekit.io/) → Settings     |
+| `LIVEKIT_SIP_OUTBOUND_TRUNK_ID` | LiveKit Cloud → Telephony → SIP Trunks       |
 | `MURF_API_KEY`       | [murf.ai/api/dashboard](https://murf.ai/api/dashboard)    |
 | `DEEPGRAM_API_KEY`   | [deepgram.com](https://console.deepgram.com/)             |
 | `GOOGLE_API_KEY`     | [aistudio.google.com](https://aistudio.google.com/apikey) |
@@ -174,6 +224,24 @@ Default is Google Gemini. To switch:
 - **OpenAI:** Set `OPENAI_API_KEY`, install `livekit-agents[openai]`, and change the `llm=` argument
 
 ## Testing
+
+### Day 7 human-help tool
+
+`src/escalation.py` stores consented help requests in local SQLite at `memory.db`. The `create_escalation` LiveKit tool is limited to serious crop problems and missing or stale market data. It requires both `consent_confirmed=True` and an explicit affirmative in the caller's latest English, Hindi, or Hinglish turn.
+
+Stored summaries contain only useful structured details and never the full transcript. Sensitive passwords, OTPs, PINs, account/card numbers, and long digit sequences are replaced with `[REDACTED]`. Matching active requests reuse their `KS-YYYYMMDD-XXXX` reference. `src/help_requests_cli.py` is the JSON bridge used by the Next.js `/api/help-requests` routes and the `/help-requests` dashboard.
+
+Run the offline Day 7 tests with:
+
+```bash
+.venv/bin/python -m pytest \
+  tests/test_escalation.py \
+  tests/test_db.py \
+  tests/test_help_requests_cli.py \
+  tests/test_agent.py -q -k "not test_offers_assistance and not test_grounding and not test_refuses_harmful_request"
+```
+
+The three excluded tests call external LiveKit inference and require network access. All storage, consent, redaction, duplicate, CLI, and tool behavior tests run locally.
 
 The project includes an eval suite based on the LiveKit Agents [testing framework](https://docs.livekit.io/agents/build/testing/):
 
