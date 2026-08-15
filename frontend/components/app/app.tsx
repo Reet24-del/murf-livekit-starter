@@ -13,10 +13,8 @@ import { useAgentErrors } from '@/hooks/useAgentErrors';
 import { useDebugMode } from '@/hooks/useDebug';
 import { getSandboxTokenSource } from '@/lib/utils';
 
-const IN_DEVELOPMENT = process.env.NODE_ENV !== 'production';
-
 function AppSetup() {
-  useDebugMode({ enabled: IN_DEVELOPMENT });
+  useDebugMode({ enabled: false });
   useAgentErrors();
 
   return null;
@@ -36,7 +34,18 @@ export function App({ appConfig }: AppProps) {
         ? localStorage.getItem('detected_location') || 'Lucknow, Uttar Pradesh'
         : 'Lucknow, Uttar Pradesh';
     const encodedLoc = encodeURIComponent(loc);
-    return TokenSource.endpoint(`/api/token?location=${encodedLoc}`);
+
+    let userId = 'unknown';
+    if (typeof window !== 'undefined') {
+      let storedId = localStorage.getItem('user_id');
+      if (!storedId) {
+        storedId = `farmer_${Math.floor(100000 + Math.random() * 900000)}`;
+        localStorage.setItem('user_id', storedId);
+      }
+      userId = storedId;
+    }
+
+    return TokenSource.endpoint(`/api/token?location=${encodedLoc}&user_id=${userId}`);
   }, [appConfig]);
 
   const session = useSession(
@@ -45,9 +54,13 @@ export function App({ appConfig }: AppProps) {
   );
 
   return (
-    <AgentSessionProvider session={session} volume={1.0}>
+    <AgentSessionProvider
+      session={session}
+      volume={Math.min(Math.max(appConfig.audioPlaybackVolume ?? 1, 0), 1)}
+      muted={false}
+    >
       <AppSetup />
-      <main className="grid h-svh grid-cols-1 place-content-center">
+      <main className="min-h-svh w-full">
         <ViewController appConfig={appConfig} />
       </main>
       <StartAudioButton label="Start Audio" />
