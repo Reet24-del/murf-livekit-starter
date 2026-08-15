@@ -1,5 +1,39 @@
 # Backend — Voice Agent with Murf Falcon TTS
 
+## Day 9 crop-problem specialist
+
+`src/agent.py` defines two separate LiveKit agents. `Assistant` remains the main
+Kisan Sahayak and exposes `handoff_to_crop_specialist`. A deterministic routing
+guard permits that handoff only for visible symptoms, pests, diseases,
+nutrient deficiencies, unexplained crop damage, or an explicit request for the
+specialist. Routine questions remain with the main agent.
+
+The handoff returns a `CropProblemSpecialist` plus a localized transfer
+announcement. It copies the current agent's chat context with instructions
+excluded, so the specialist receives the farmer's earlier turns without
+inheriting the main system prompt. On entry, the specialist introduces itself,
+acknowledges the transferred problem, and starts focused triage without asking
+the farmer to repeat it. The main session uses Murf Anisha; the specialist
+overrides the session voice with Murf Samar so the handoff is audibly clear.
+
+Offline routing and context-preservation tests are included in
+`tests/test_agent.py`.
+
+## Day 8 call analytics
+
+Kisan Sahayak stores privacy-safe browser and SIP call outcomes in the local
+SQLite `memory.db`. A call is successful when the farmer asks a farming or
+weather question and receives a complete answer, live-data result, or confirmed
+expert request. Records contain only a random call ID, timestamps, duration,
+channel, detected language, outcome, and controlled result/failure categories.
+No phone number, caller identity, transcript, or free-text summary is stored.
+
+The dashboard's JSON bridge can be checked with:
+
+```bash
+.venv/bin/python src/call_analytics_cli.py summary --days 7
+```
+
 The Python backend for the Voice Agent Starter. It runs a real-time voice AI pipeline using [LiveKit Agents](https://docs.livekit.io/agents), connecting Murf Falcon TTS, Deepgram STT, and Google Gemini into a single conversational agent.
 
 ## How It Works

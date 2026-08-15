@@ -32,7 +32,7 @@ Fill in your LiveKit credentials (same project as the backend):
 LIVEKIT_URL=wss://your-project.livekit.cloud
 LIVEKIT_API_KEY=your_key
 LIVEKIT_API_SECRET=your_secret
-AGENT_NAME=my-agent
+AGENT_NAME=kisan-sahayak-primary
 ```
 
 ### 3. Run
@@ -41,7 +41,7 @@ AGENT_NAME=my-agent
 pnpm dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000). Make sure your backend agent is running too.
+Open [http://localhost:3001](http://localhost:3001). Make sure your backend agent is running too.
 
 ## Customization
 
@@ -122,7 +122,7 @@ frontend/
 
 ### Vercel
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/murf-ai/murf-livekit-starter&root-directory=frontend&env=LIVEKIT_URL,LIVEKIT_API_KEY,LIVEKIT_API_SECRET&project-name=murf-voice-agent&repository-name=murf-voice-agent)
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/Reet24-del/murf-livekit-starter&root-directory=frontend&env=LIVEKIT_URL,LIVEKIT_API_KEY,LIVEKIT_API_SECRET&project-name=kisan-sahayak&repository-name=kisan-sahayak)
 
 Set these environment variables:
 

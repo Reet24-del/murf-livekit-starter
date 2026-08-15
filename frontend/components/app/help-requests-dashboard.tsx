@@ -5,6 +5,7 @@ import Link from 'next/link';
 import {
   ArrowLeft,
   ArrowUp,
+  BarChart3,
   Check,
   ChevronDown,
   CircleAlert,
@@ -237,10 +238,16 @@ export function HelpRequestsDashboard() {
           </span>
           <span>Kisan Sahayak</span>
         </Link>
-        <Link className={styles.backLink} href="/">
-          <ArrowLeft aria-hidden="true" />
-          Back to voice assistant
-        </Link>
+        <div className={styles.headerActions}>
+          <Link className={styles.backLink} href="/call-analytics">
+            <BarChart3 aria-hidden="true" />
+            Call analytics
+          </Link>
+          <Link className={styles.backLink} href="/">
+            <ArrowLeft aria-hidden="true" />
+            Back to voice assistant
+          </Link>
+        </div>
       </header>
 
       <main className={styles.main}>

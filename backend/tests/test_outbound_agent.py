@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from call_analytics import CallTracker
 from db import is_outbound_opted_out, record_outbound_opt_out
 from telephony.outbound.agent import (
     OutboundFarmAgent,
@@ -85,6 +86,37 @@ async def test_live_weather_response_preserves_source_timestamp() -> None:
 
     assert "Open-Meteo data timestamp: 2026-08-11T14:00 local time" in response
     assert "75% maximum chance of rain" in response
+
+
+@pytest.mark.asyncio
+async def test_live_weather_marks_outbound_advisory_success() -> None:
+    async def weather_fetcher(district: str) -> WeatherReport:
+        return WeatherReport(
+            location_name=district,
+            observed_at="2026-08-13T10:00",
+            forecast_date="2026-08-13",
+            temperature_c=29,
+            weather_description="rain",
+            wind_speed_kmh=8,
+            minimum_temperature_c=25,
+            maximum_temperature_c=31,
+            precipitation_probability_percent=75,
+        )
+
+    tracker = CallTracker("sip", recorder=lambda record: record)
+    tracker.observe_user("Will it rain today?")
+    agent = OutboundFarmAgent(
+        fake_job_context(call_metadata()),
+        call_metadata(),
+        weather_fetcher=weather_fetcher,
+        analytics=tracker,
+    )
+
+    await agent._live_weather_response()
+    outcome = tracker.finalize()
+
+    assert outcome.outcome == "successful"
+    assert outcome.result_category == "rain_advisory_delivered"
 
 
 @pytest.mark.asyncio

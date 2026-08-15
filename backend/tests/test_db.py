@@ -149,3 +149,24 @@ def test_init_db_creates_help_requests_table(tmp_path) -> None:
         "created_at",
         "updated_at",
     } <= columns
+
+
+def test_init_db_creates_privacy_safe_call_analytics_table(tmp_path) -> None:
+    db_path = tmp_path / "memory.db"
+
+    init_db(str(db_path))
+
+    with sqlite3.connect(db_path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(call_analytics)")}
+
+    assert columns == {
+        "call_id",
+        "started_at",
+        "ended_at",
+        "duration_seconds",
+        "channel",
+        "language",
+        "outcome",
+        "result_category",
+        "failure_category",
+    }

@@ -22,9 +22,11 @@ from livekit.agents import (
     room_io,
     tokenize,
 )
+from livekit.agents.voice.events import ConversationItemAddedEvent
 from livekit.plugins import deepgram, google, murf, noise_cancellation, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
+from call_analytics import CallTracker
 from db import init_db, is_outbound_opted_out, record_outbound_opt_out
 from telephony.outbound.call_config import (
     CallLanguage,
@@ -120,6 +122,7 @@ class OutboundFarmAgent(Agent):
             fetch_district_weather
         ),
         opt_out_recorder: Callable[[str], None] = record_outbound_opt_out,
+        analytics: CallTracker | None = None,
     ) -> None:
         crop_context = metadata.crop or "not provided"
         super().__init__(
@@ -135,6 +138,7 @@ class OutboundFarmAgent(Agent):
         self.response_language: CallLanguage = metadata.language
         self._weather_fetcher = weather_fetcher
         self._opt_out_recorder = opt_out_recorder
+        self._analytics = analytics
 
     async def on_user_turn_completed(
         self,
@@ -152,17 +156,23 @@ class OutboundFarmAgent(Agent):
         try:
             report = await self._weather_fetcher(self.metadata.district)
         except WeatherLookupError as error:
+            if self._analytics:
+                self._analytics.mark_failure("tool_failure")
             logger.warning(
                 "Live weather lookup failed for outbound district %s: %s",
                 self.metadata.district,
                 error,
             )
         except Exception:
+            if self._analytics:
+                self._analytics.mark_failure("tool_failure")
             logger.exception(
                 "Unexpected outbound weather failure for %s",
                 self.metadata.district,
             )
         else:
+            if self._analytics:
+                self._analytics.mark_result("rain_advisory_delivered")
             return report.to_spoken_text()
 
         return (
@@ -196,6 +206,9 @@ class OutboundFarmAgent(Agent):
                 "success, and ask the operator to remove this destination manually."
             )
 
+        if self._analytics:
+            self._analytics.mark_failure("recipient_opted_out")
+
         await context.session.generate_reply(
             instructions=f"Say exactly this confirmation: {confirmation}"
         )
@@ -206,6 +219,8 @@ class OutboundFarmAgent(Agent):
     async def detected_answering_machine(self, context: RunContext) -> str:
         """End the call without leaving a message when voicemail or an answering machine is detected."""
         logger.info("Answering machine detected; ending outbound call")
+        if self._analytics:
+            self._analytics.mark_failure("no_response")
         await self._hangup()
         return "Call ended without leaving a voicemail."
 
@@ -250,71 +265,118 @@ async def outbound_agent(ctx: JobContext) -> None:
         ctx.shutdown()
         return
 
-    await ctx.connect()
-    session = AgentSession(
-        stt=deepgram.STT(model="nova-3", language="multi"),
-        llm=google.LLM(model="gemini-3.5-flash-lite"),
-        tts=murf.TTS(
-            voice="Anisha",
-            style="Conversation",
-            tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
-            text_pacing=True,
-        ),
-        turn_detection=MultilingualModel(),
-        vad=ctx.proc.userdata["vad"],
-        preemptive_generation=True,
-    )
-    agent = OutboundFarmAgent(ctx, metadata)
-    session_started = asyncio.create_task(
-        session.start(
-            agent=agent,
-            room=ctx.room,
-            room_options=room_io.RoomOptions(
-                audio_input=room_io.AudioInputOptions(
-                    noise_cancellation=lambda params: (
-                        noise_cancellation.BVCTelephony()
-                        if params.participant.kind
-                        == rtc.ParticipantKind.PARTICIPANT_KIND_SIP
-                        else noise_cancellation.BVC()
-                    )
-                )
-            ),
-        )
-    )
+    analytics = CallTracker("sip")
+    call_finalized = False
 
-    logger.info("Dialing consented outbound destination %s", metadata.destination)
+    async def finalize_analytics() -> None:
+        nonlocal call_finalized
+        if call_finalized:
+            return
+        try:
+            analytics.finalize()
+            call_finalized = True
+        except Exception:
+            logger.exception("Failed to persist outbound call analytics.")
+
+    async def safe_finalize() -> None:
+        await finalize_analytics()
+
+    ctx.add_shutdown_callback(safe_finalize)
+
     try:
-        await create_outbound_participant(ctx, metadata, OUTBOUND_TRUNK_ID)
-    except api.TwirpError as error:
-        sip_status = error.metadata.get("sip_status") if error.metadata else None
-        logger.error(
-            "Outbound call was not answered: %s (SIP status: %s)",
-            error.message,
-            sip_status,
+        await ctx.connect()
+        session = AgentSession(
+            stt=deepgram.STT(model="nova-3", language="multi"),
+            llm=google.LLM(model="gemini-3.5-flash-lite"),
+            tts=murf.TTS(
+                voice="Anisha",
+                style="Conversation",
+                tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
+                text_pacing=True,
+            ),
+            turn_detection=MultilingualModel(),
+            vad=ctx.proc.userdata["vad"],
+            preemptive_generation=True,
         )
-        session_started.cancel()
-        ctx.shutdown()
-        return
-    except Exception:
-        logger.exception("Outbound SIP call failed")
-        session_started.cancel()
-        ctx.shutdown()
-        return
+        agent = OutboundFarmAgent(ctx, metadata, analytics=analytics)
 
-    await session_started
-    await session.say(
-        opening_greeting(metadata.language),
-        allow_interruptions=True,
-    )
-    advisory_instruction = (
-        "Call get_live_weather now, then give the live rain advisory in English."
-        if metadata.language == "en"
-        else (
-            "Call get_live_weather now, then give the live rain advisory in Hindi "
-            "written only in Devanagari."
+        @session.on("conversation_item_added")
+        def on_conversation_item_added(event: ConversationItemAddedEvent) -> None:
+            item = event.item
+            role = getattr(item, "role", None)
+            text = (
+                getattr(item, "text_content", None)
+                or getattr(item, "text", None)
+                or getattr(item, "content", None)
+            )
+            if not isinstance(text, str) or not text.strip():
+                return
+            if role == "user":
+                analytics.observe_user(text)
+            elif role == "assistant":
+                analytics.observe_assistant(text)
+
+        session_started = asyncio.create_task(
+            session.start(
+                agent=agent,
+                room=ctx.room,
+                room_options=room_io.RoomOptions(
+                    audio_input=room_io.AudioInputOptions(
+                        noise_cancellation=lambda params: (
+                            noise_cancellation.BVCTelephony()
+                            if params.participant.kind
+                            == rtc.ParticipantKind.PARTICIPANT_KIND_SIP
+                            else noise_cancellation.BVC()
+                        )
+                    )
+                ),
+            )
         )
-    )
-    await session.generate_reply(instructions=advisory_instruction)
+
+        logger.info("Dialing consented outbound destination %s", metadata.destination)
+        try:
+            await create_outbound_participant(ctx, metadata, OUTBOUND_TRUNK_ID)
+        except api.TwirpError as error:
+            sip_status = error.metadata.get("sip_status") if error.metadata else None
+            logger.error(
+                "Outbound call was not answered: %s (SIP status: %s)",
+                error.message,
+                sip_status,
+            )
+            session_started.cancel()
+            analytics.mark_failure("not_answered")
+            await finalize_analytics()
+            ctx.shutdown()
+            return
+        except Exception:
+            logger.exception("Outbound SIP call failed")
+            session_started.cancel()
+            analytics.mark_failure("dial_failed")
+            await finalize_analytics()
+            ctx.shutdown()
+            return
+
+        await session_started
+        await session.say(
+            opening_greeting(metadata.language),
+            allow_interruptions=True,
+        )
+        advisory_instruction = (
+            "Call get_live_weather now, then give the live rain advisory in English."
+            if metadata.language == "en"
+            else (
+                "Call get_live_weather now, then give the live rain advisory in Hindi "
+                "written only in Devanagari."
+            )
+        )
+        await session.generate_reply(instructions=advisory_instruction)
+        await session.wait_for_shutdown()
+    except Exception:
+        logger.exception("Unhandled outbound agent exception.")
+        analytics.mark_failure("agent_error")
+        raise
+    finally:
+        await finalize_analytics()
 
 
 if __name__ == "__main__":

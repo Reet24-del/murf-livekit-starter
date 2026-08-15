@@ -87,6 +87,12 @@
   color: white;
 }
 
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+}
+
 .main {
   position: relative;
   z-index: 1;
@@ -511,6 +517,14 @@
     max-width: 115px;
     font-size: 0.82rem;
     line-height: 1.15;
+  }
+
+  .headerActions {
+    gap: 10px;
+  }
+
+  .headerActions .backLink:first-child {
+    display: none;
   }
 
   .main {

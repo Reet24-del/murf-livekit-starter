@@ -20,7 +20,7 @@ def _validate_destination(destination: str) -> str:
 
 
 def init_db(db_path: str | None = None) -> None:
-    """Initialize the caller-memory, opt-out, and human-help tables."""
+    """Initialize memory, opt-out, human-help, and call-analytics tables."""
     database = db_path or DB_PATH
     with sqlite3.connect(database) as conn:
         conn.execute(
@@ -53,9 +53,11 @@ def init_db(db_path: str | None = None) -> None:
             """
         )
 
+    from call_analytics import init_call_analytics_table
     from escalation import init_help_requests_table
 
     init_help_requests_table(database)
+    init_call_analytics_table(database)
 
 
 def get_caller(user_id: str, db_path: str | None = None) -> dict[str, str] | None:

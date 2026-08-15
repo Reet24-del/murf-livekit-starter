@@ -1,7 +1,10 @@
+import { normalizeAudioPlaybackVolume } from './lib/audio-playback-values.mjs';
+
 export interface AppConfig {
   pageTitle: string;
   pageDescription: string;
   companyName: string;
+  audioPlaybackVolume?: number;
 
   supportsChatInput: boolean;
   supportsVideoInput: boolean;
@@ -32,6 +35,8 @@ export interface AppConfig {
   sandboxId?: string;
 }
 
+const safeAgentVolume = normalizeAudioPlaybackVolume(process.env.NEXT_PUBLIC_AGENT_VOLUME);
+
 export const APP_CONFIG_DEFAULTS: AppConfig = {
   companyName: 'Kisan Sahayak',
   pageTitle: 'Kisan Sahayak — Farm Voice Assistant',
@@ -50,8 +55,10 @@ export const APP_CONFIG_DEFAULTS: AppConfig = {
   startButtonText: 'Start Call',
 
   // agent dispatch configuration
-  agentName: process.env.AGENT_NAME ?? undefined,
+  agentName: process.env.AGENT_NAME ?? 'kisan-sahayak-primary',
 
   // LiveKit Cloud Sandbox configuration
   sandboxId: undefined,
+
+  audioPlaybackVolume: safeAgentVolume,
 };

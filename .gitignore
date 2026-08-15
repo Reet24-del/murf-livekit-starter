@@ -3,4 +3,5 @@
 !.env.example
 .DS_Store
 backend/memory.db
+.superpowers/
 frontend/queries.json

@@ -1,8 +1,8 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { ConnectionState } from 'livekit-client';
-import { ClipboardList } from 'lucide-react';
+import { ConnectionState, RoomEvent } from 'livekit-client';
+import { BarChart3, ClipboardList } from 'lucide-react';
 import {
   useSessionContext,
   useSessionMessages,
@@ -17,6 +17,12 @@ import {
 } from '@/lib/caller-profile';
 import { MemoryPanel } from './voice-portal/memory-panel';
 import { PhoneIcon, ResetIcon, SproutIcon } from './voice-portal/portal-icons';
+import {
+  SPECIALIST_SIGNAL_TOPIC,
+  deriveSpecialistPhase,
+  getSpecialistVoiceContent,
+  parseSpecialistSignal,
+} from './voice-portal/specialist-handoff-state.mjs';
 import { TranscriptDock } from './voice-portal/transcript-dock';
 import { VoiceOrb } from './voice-portal/voice-orb';
 import styles from './voice-portal/voice-portal.module.css';
@@ -48,6 +54,9 @@ export function KisanSahayakView({ appConfig: _appConfig }: KisanSahayakViewProp
   const [detectedLocation, setDetectedLocation] = useState('Lucknow');
   const [callerProfile, setCallerProfile] = useState<CallerProfileSummary | null>(null);
   const [profileLoading, setProfileLoading] = useState(true);
+  const [specialistSignalPhase, setSpecialistSignalPhase] = useState<
+    'connecting' | 'active' | null
+  >(null);
 
   const agentVolume = useTrackVolume(audioTrack, {
     fftSize: 256,
@@ -62,6 +71,24 @@ export function KisanSahayakView({ appConfig: _appConfig }: KisanSahayakViewProp
     const savedLocation = localStorage.getItem('detected_location')?.split(',')[0];
     if (savedLocation) setDetectedLocation(savedLocation);
   }, []);
+
+  useEffect(() => {
+    const handleAgentSignal = (
+      payload: Uint8Array,
+      _participant: unknown,
+      _kind: unknown,
+      topic?: string
+    ) => {
+      if (topic !== SPECIALIST_SIGNAL_TOPIC) return;
+      const phase = parseSpecialistSignal(new TextDecoder().decode(payload));
+      if (phase) setSpecialistSignalPhase(phase);
+    };
+
+    session.room.on(RoomEvent.DataReceived, handleAgentSignal);
+    return () => {
+      session.room.off(RoomEvent.DataReceived, handleAgentSignal);
+    };
+  }, [session.room]);
 
   useEffect(() => {
     if (session.isConnected) {
@@ -118,12 +145,15 @@ export function KisanSahayakView({ appConfig: _appConfig }: KisanSahayakViewProp
     currentState = 'ended';
   }
 
-  const activeState = VOICE_STATE_CONTENT[currentState];
+  const specialistPhase = deriveSpecialistPhase(messages, specialistSignalPhase);
+  const activeState =
+    getSpecialistVoiceContent(specialistPhase, currentState) ?? VOICE_STATE_CONTENT[currentState];
   const hasMicError = micError === 'permission_denied' || micPermissionStatus === 'denied';
 
   const startSession = async () => {
     try {
       setMicError(null);
+      setSpecialistSignalPhase(null);
       await session.start?.();
     } catch (error: unknown) {
       console.error('Failed to start voice session:', error);
@@ -162,13 +192,21 @@ export function KisanSahayakView({ appConfig: _appConfig }: KisanSahayakViewProp
           <span>Kisan Sahayak</span>
         </a>
         <div className={styles.topbarActions}>
+          <a className={styles.helpLink} href="/call-analytics">
+            <BarChart3 aria-hidden="true" />
+            <span>Call analytics</span>
+          </a>
           <a className={styles.helpLink} href="/help-requests">
             <ClipboardList aria-hidden="true" />
             <span>Human request log</span>
           </a>
           <span className={styles.connectionState}>
             <span className={styles.connectionDot} data-connected={session.isConnected} />
-            {session.isConnected ? 'Connected' : 'Disconnected'}
+            {session.isConnected
+              ? specialistPhase === 'active'
+                ? 'Specialist connected'
+                : 'Connected'
+              : 'Disconnected'}
           </span>
           <span className={styles.headerDivider} aria-hidden="true" />
           <button className={styles.resetButton} type="button" onClick={handleResetMemory}>

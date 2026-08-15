@@ -1,8 +1,14 @@
 import asyncio
+import fcntl
+import json
 import logging
+import os
 import re
+import tempfile
 from collections.abc import Awaitable, Callable
+from contextlib import contextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import Literal
 from zoneinfo import ZoneInfo
 
@@ -27,6 +33,7 @@ from livekit.agents.voice.events import ConversationItemAddedEvent
 from livekit.plugins import deepgram, google, murf, noise_cancellation, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
+from call_analytics import CallTracker
 from db import get_caller, init_db, save_caller
 from escalation import create_or_update_help_request
 from language import detect_response_language, response_language_instruction
@@ -35,6 +42,36 @@ from weather import WeatherLookupError, WeatherReport, fetch_district_weather
 logger = logging.getLogger("agent")
 
 load_dotenv(".env.local")
+
+ACTIVE_AGENT_NAME_ENV = "KISAN_AGENT_NAME"
+UNMANAGED_AGENT_NAME = "kisan-sahayak-unmanaged"
+DEFAULT_AGENT_NAME = (
+    "kisan-sahayak-primary" if __name__ == "__mp_main__" else UNMANAGED_AGENT_NAME
+)
+BROWSER_AGENT_NAME = os.environ.get(ACTIVE_AGENT_NAME_ENV, DEFAULT_AGENT_NAME)
+DEFAULT_WORKER_LOCK_PATH = Path(tempfile.gettempdir()) / "kisan-sahayak-day9-worker.lock"
+SPECIALIST_SIGNAL_TOPIC = "kisan.sahayak.agent"  # Reliable browser handoff state.
+
+
+@contextmanager
+def browser_worker_lock(lock_path: str | Path = DEFAULT_WORKER_LOCK_PATH):
+    """Allow only one startup-managed browser worker at a time."""
+    descriptor = os.open(Path(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError(
+                "Another managed Kisan Sahayak backend is already running."
+            ) from exc
+        os.ftruncate(descriptor, 0)
+        os.write(descriptor, str(os.getpid()).encode("ascii"))
+        yield
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
 # Structured prompt for Kisan Sahayak Voice Assistant
 SYSTEM_PROMPT = """
@@ -62,6 +99,12 @@ CURRENT TIME TOOL:
 - Whenever the caller asks for the current time or date in India, call `get_current_india_time` before answering.
 - Repeat the exact time returned by the tool without rounding, converting, or guessing.
 
+CROP PROBLEM SPECIALIST HANDOFF:
+- You are the main Kisan Sahayak agent. Handle routine weather, crop selection, irrigation, soil care, time, memory, and market-data questions yourself.
+- When a farmer reports visible crop symptoms, pests, disease, nutrient deficiency, unexplained crop damage, or explicitly asks for the crop problem specialist, call `handoff_to_crop_specialist` instead of diagnosing the problem yourself.
+- The handoff tool preserves the conversation and provides the transfer announcement. The farmer must not be asked to repeat the problem.
+- Do not call the specialist for normal farming or weather questions.
+
 LANGUAGE:
 - The user's latest turn controls the response language and overrides the greeting, conversation history, saved preferences, and tool-output language.
 - If the latest turn contains Devanagari text, reply only in Hindi using Devanagari script.
@@ -88,6 +131,7 @@ MEMORY AND SAVING DATA:
 - The `save_caller_profile` tool allows partial updates. Pass only the fields that need to be updated and leave other arguments blank/None.
 
 HUMAN HELP:
+- A crop symptom, pest, or disease report must go to `handoff_to_crop_specialist` first. Do not offer human help and do not call `create_escalation` on that initial specialist-eligible turn.
 - Offer human help only for a serious crop problem such as severe or rapidly spreading crop damage, or when exact market data is missing or stale. Do not offer it for normal farming, weather, time, or memory questions.
 - For a serious crop problem use high urgency. For missing or stale market data use medium urgency.
 - First call `create_escalation` with consent_confirmed=false. Speak its returned consent question exactly; it explains what would be shared and asks whether to create an expert help request.
@@ -111,6 +155,15 @@ _CONSENT_NEGATIVE_PATTERN = re.compile(
 )
 _CONSENT_AFFIRMATIVE_PATTERN = re.compile(
     r"\b(?:yes|yes\s+please|haan|han|sure|please\s+do)\b|(?:हाँ|हां)",
+    re.IGNORECASE,
+)
+
+_CROP_SPECIALIST_PATTERN = re.compile(
+    r"\b(?:crop\s+(?:problem\s+)?specialist|plant\s+(?:disease|doctor)|"
+    r"disease|pests?|insects?|fung(?:us|al)|infestation|leaf\s+spots?|"
+    r"black\s+spots?|white\s+insects?|curling|wilting|rotting|dying|"
+    r"yellow(?:ing)?\s+leaves|keede|kide|rog|daag|peeli|murjha|sukh|sad)\b|"
+    r"(?:कीड़े|कीड़ा|कीड़ा|रोग|धब्बे|पीली|पीला|मुरझा|सूख|सड़|पत्तियां|पत्तियाँ)",
     re.IGNORECASE,
 )
 
@@ -148,6 +201,103 @@ def format_india_time(value: datetime) -> str:
     return local_value.strftime("%I:%M %p IST on %d %B %Y").lstrip("0")
 
 
+def needs_crop_problem_specialist(text: str) -> bool:
+    """Return whether a turn needs crop symptom, pest, or disease triage."""
+    return bool(_CROP_SPECIALIST_PATTERN.search(text.strip()))
+
+
+def make_room_signal_publisher(
+    room: rtc.Room,
+) -> Callable[..., Awaitable[None]]:
+    """Resolve LiveKit's local participant only after the room has connected."""
+
+    async def publish(payload: str, *, reliable: bool, topic: str) -> None:
+        await room.local_participant.publish_data(
+            payload,
+            reliable=reliable,
+            topic=topic,
+        )
+
+    return publish
+
+
+async def _publish_specialist_phase(
+    publisher: Callable[..., Awaitable[None]] | None, phase: str
+) -> None:
+    """Tell the browser which voice agent currently owns the conversation."""
+    if publisher is None:
+        return
+
+    payload = json.dumps(
+        {"type": "specialist_handoff", "phase": phase}, separators=(",", ":")
+    )
+    try:
+        await publisher(
+            payload,
+            reliable=True,
+            topic=SPECIALIST_SIGNAL_TOPIC,
+        )
+    except Exception:
+        logger.warning("Unable to publish specialist UI state", exc_info=True)
+
+
+class CropProblemSpecialist(Agent):
+    """Focused agent for crop symptom, pest, and disease triage."""
+
+    def __init__(
+        self,
+        *,
+        chat_ctx: ChatContext,
+        agent_signal_publisher: Callable[..., Awaitable[None]] | None = None,
+    ) -> None:
+        self._agent_signal_publisher = agent_signal_publisher
+        super().__init__(
+            instructions="""
+You are the Crop Problem Specialist for Kisan Sahayak.
+
+Your only job is to help farmers triage visible crop symptoms, pests, diseases,
+nutrient deficiencies, and unexplained crop damage. Use the transferred
+conversation so the farmer never has to repeat the problem. State likely causes
+as possibilities, ask at most one focused clarification at a time, and give only
+safe, low-risk first steps.
+
+Do not answer weather, market price, subsidy, memory, time, or general crop
+selection questions. Never claim a certain diagnosis from voice description
+alone, and never invent pesticide names or doses. For rapid, severe, or widespread
+damage, recommend the local KVK or Kisan Call Center at 1800-180-1551.
+
+Reply in the language and script of the farmer's latest turn: English for English,
+Devanagari Hindi for Hindi, and Roman-script Hinglish for Hinglish. Keep every
+spoken response to one or two short sentences.
+""",
+            chat_ctx=chat_ctx,
+            tts=murf.TTS(
+                voice="Samar",
+                style="Conversational",
+                tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
+                text_pacing=True,
+            ),
+        )
+
+    async def on_enter(self) -> None:
+        await _publish_specialist_phase(self._agent_signal_publisher, "active")
+        latest_problem = next(
+            (
+                message.text_content
+                for message in reversed(self.chat_ctx.messages())
+                if message.role == "user" and message.text_content
+            ),
+            "the crop problem already described in the transferred conversation",
+        )
+        self.session.generate_reply(
+            instructions=(
+                "Introduce yourself as the Crop Problem Specialist, acknowledge the "
+                f"transferred problem ('{latest_problem}'), and begin focused triage. "
+                "Do not ask the farmer to repeat any information already provided."
+            )
+        )
+
+
 class Assistant(Agent):
     def __init__(
         self,
@@ -159,15 +309,20 @@ class Assistant(Agent):
         escalation_creator: Callable[..., dict[str, str]] = (
             create_or_update_help_request
         ),
+        analytics: CallTracker | None = None,
+        agent_signal_publisher: Callable[..., Awaitable[None]] | None = None,
     ) -> None:
         super().__init__(instructions=instructions)
         self._profile_lookup = profile_lookup
         self._weather_fetcher = weather_fetcher
         self._escalation_creator = escalation_creator
+        self._analytics = analytics
+        self._agent_signal_publisher = agent_signal_publisher
         self._latest_user_text = ""
         self._user_turn_number = 0
         self._pending_escalation_turn: int | None = None
         self._pending_escalation_payload: dict[str, str] | None = None
+        self._main_tools = tuple(self.tools)
 
     async def on_user_turn_completed(
         self,
@@ -178,9 +333,58 @@ class Assistant(Agent):
         self._latest_user_text = latest_text.strip()
         self._user_turn_number += 1
         mode = detect_response_language(latest_text)
+        requires_specialist = needs_crop_problem_specialist(self._latest_user_text)
+        available_tools = [
+            tool
+            for tool in self._main_tools
+            if not (requires_specialist and tool.id == "create_escalation")
+        ]
+        await self.update_tools(available_tools)
         turn_ctx.add_message(
             role="system",
             content=response_language_instruction(mode),
+        )
+        if requires_specialist:
+            turn_ctx.add_message(
+                role="system",
+                content=(
+                    "This turn requires the crop problem specialist. Do not diagnose "
+                    "the crop problem yourself or offer human escalation. Call "
+                    "`handoff_to_crop_specialist` now; "
+                    "its result announces the transfer before the specialist takes over."
+                ),
+            )
+
+    @function_tool
+    async def handoff_to_crop_specialist(
+        self, context: RunContext
+    ) -> Agent | tuple[Agent, str] | str:
+        """Transfer to the crop problem specialist only when the farmer reports crop symptoms, pests, disease, nutrient deficiency, unexplained crop damage, or explicitly asks for that specialist. Do not use for weather, crop selection, irrigation, soil care, time, memory, market data, or other routine farming questions. The specialist receives the existing conversation and the farmer must not repeat the problem."""
+        if not needs_crop_problem_specialist(self._latest_user_text):
+            return (
+                "This question does not need the crop problem specialist. "
+                "Continue helping as Kisan Sahayak."
+            )
+
+        prior_context = context.session.current_agent.chat_ctx.copy(
+            exclude_instructions=True
+        )
+        mode = detect_response_language(self._latest_user_text)
+        announcements = {
+            "english": "I will connect you to our crop problem specialist.",
+            "hindi": "मैं आपको हमारी फसल समस्या विशेषज्ञ से जोड़ रही हूँ।",
+            "hinglish": (
+                "Main aapko hamari crop problem specialist se connect kar rahi hoon."
+            ),
+            "mirror": "Main aapko crop problem specialist se connect kar rahi hoon.",
+        }
+        await _publish_specialist_phase(self._agent_signal_publisher, "connecting")
+        return (
+            CropProblemSpecialist(
+                chat_ctx=prior_context,
+                agent_signal_publisher=self._agent_signal_publisher,
+            ),
+            announcements[mode.value],
         )
 
     def _caller_identity(self) -> str | None:
@@ -300,12 +504,16 @@ class Assistant(Agent):
                 consent_confirmed=True,
             )
         except Exception:
+            if self._analytics:
+                self._analytics.mark_failure("tool_failure")
             logger.exception("Failed to create human-help request for %s", caller_id)
             return (
                 "The human-help request could not be created right now. Please call "
                 "the Kisan Call Center at 1800-180-1551 or contact your local KVK."
             )
 
+        if self._analytics:
+            self._analytics.mark_result("expert_request_created")
         return (
             f"Human-help request {request['reference_id']} is {request['status']}. "
             "The caller can follow its status in the Help Requests dashboard; a "
@@ -437,18 +645,24 @@ class Assistant(Agent):
         try:
             report = await self._weather_fetcher(district)
         except WeatherLookupError as error:
+            if self._analytics:
+                self._analytics.mark_failure("tool_failure")
             logger.warning("Live weather lookup failed for %s: %s", district, error)
             return (
                 "Live weather data is unavailable right now, so I will not guess. "
                 "Please try again shortly or check your local weather service."
             )
         except Exception:
+            if self._analytics:
+                self._analytics.mark_failure("tool_failure")
             logger.exception("Unexpected live weather failure for %s", district)
             return (
                 "Live weather data is unavailable right now, so I will not guess. "
                 "Please try again shortly or check your local weather service."
             )
 
+        if self._analytics:
+            self._analytics.mark_result("live_weather_delivered")
         return report.to_spoken_text()
 
     @function_tool
@@ -547,13 +761,33 @@ def prewarm(proc: JobProcess):
 server.setup_fnc = prewarm
 
 
-@server.rtc_session(agent_name="my-agent")
+@server.rtc_session(agent_name=BROWSER_AGENT_NAME)
 async def my_agent(ctx: JobContext):
     # Logging setup
     # Add any other context you want in all log entries here
     ctx.log_context_fields = {
         "room": ctx.room.name,
     }
+
+    analytics = CallTracker("browser")
+    call_finalized = False
+
+    async def finalize_analytics(failure: str | None = None) -> None:
+        nonlocal call_finalized
+        if call_finalized:
+            return
+        if failure:
+            analytics.mark_failure(failure)
+        try:
+            analytics.finalize()
+            call_finalized = True
+        except Exception:
+            logger.exception("Failed to persist call analytics record.")
+
+    async def safe_finalize() -> None:
+        await finalize_analytics()
+
+    ctx.add_shutdown_callback(safe_finalize)
 
     # Set up a voice AI pipeline using Murf Falcon, Gemini, Deepgram, and the LiveKit turn detector
     session = AgentSession(
@@ -580,159 +814,113 @@ async def my_agent(ctx: JobContext):
         # allow the LLM to generate a response while waiting for the end of turn
         # See more at https://docs.livekit.io/agents/build/audio/#preemptive-generation
         preemptive_generation=False,
-        # Timeout user state to 'away' after 15 seconds of complete silence
-        user_away_timeout=15.0,
+        # Wait longer before marking the caller as away; we now avoid auto-disconnect on silence.
+        user_away_timeout=60.0,
     )
 
-    silence_failures = 0
-    silence_tasks = set()
+    last_away_prompt_ts = 0.0
+    re_prompt_tasks: set[asyncio.Task[None]] = set()
 
     @session.on("user_state_changed")
     def on_user_state_changed(ev: UserStateChangedEvent):
-        nonlocal silence_failures
+        nonlocal last_away_prompt_ts
         logger.info(f"User state changed: {ev.old_state} -> {ev.new_state}")
         if ev.new_state == "away":
-            silence_failures += 1
-            if silence_failures == 1:
-                logger.info("First silence timeout. Speaking re-prompt.")
+            now = asyncio.get_running_loop().time()
+            # Avoid repeatedly sending reminders while the user is quiet.
+            if now - last_away_prompt_ts < 30:
+                return
+            last_away_prompt_ts = now
+            logger.info("User appears away. Sending one-time re-prompt.")
 
-                async def re_prompt():
-                    try:
-                        await session.say(
-                            "जी, क्या आप वहाँ हैं? खेती से जुड़ा कोई सवाल है तो पूछिए।"
-                        )
-                    except Exception as e:
-                        logger.error(f"Error speaking re-prompt: {e}")
+            async def re_prompt():
+                try:
+                    await session.say(
+                        "जी, क्या आप वहाँ हैं? अगर आप अभी भी पूछना चाहते हैं, मैं सुनने के लिए तैयार हूँ।"
+                    )
+                except Exception as e:
+                    logger.error(f"Error speaking re-prompt: {e}")
 
-                t1 = asyncio.create_task(re_prompt())
-                silence_tasks.add(t1)
-                t1.add_done_callback(silence_tasks.discard)
-            elif silence_failures >= 2:
-                logger.info(
-                    "Second silence timeout. Speaking departure and disconnecting."
-                )
-
-                async def close_session():
-                    try:
-                        await session.say(
-                            "आपकी तरफ से कोई जवाब नहीं मिला। मैं कॉल बंद कर रही हूँ। धन्यवाद।"
-                        )
-                        await asyncio.sleep(4.5)
-                        await ctx.disconnect()
-                    except Exception as e:
-                        logger.error(f"Error during graceful close: {e}")
-                        await ctx.disconnect()
-
-                t2 = asyncio.create_task(close_session())
-                silence_tasks.add(t2)
-                t2.add_done_callback(silence_tasks.discard)
+            task = asyncio.create_task(re_prompt())
+            re_prompt_tasks.add(task)
+            task.add_done_callback(re_prompt_tasks.discard)
         elif ev.new_state == "speaking":
-            # Reset failures if user speaks
-            silence_failures = 0
+            # Caller is actively speaking; keep silence reminder timer reset.
+            last_away_prompt_ts = 0.0
 
-    # Start the session, which initializes the voice pipeline and warms up the models
-    assistant = Assistant()
-    assistant.room = ctx.room
+    try:
+        # Start the session, which initializes the voice pipeline and warms up the models
+        assistant = Assistant(
+            analytics=analytics,
+            agent_signal_publisher=make_room_signal_publisher(ctx.room),
+        )
+        assistant.room = ctx.room
 
-    await session.start(
-        agent=assistant,
-        room=ctx.room,
-        room_options=room_io.RoomOptions(
-            audio_input=room_io.AudioInputOptions(
-                noise_cancellation=lambda params: (
-                    noise_cancellation.BVCTelephony()
-                    if params.participant.kind
-                    == rtc.ParticipantKind.PARTICIPANT_KIND_SIP
-                    else noise_cancellation.BVC()
+        await session.start(
+            agent=assistant,
+            room=ctx.room,
+            room_options=room_io.RoomOptions(
+                audio_input=room_io.AudioInputOptions(
+                    noise_cancellation=lambda params: (
+                        noise_cancellation.BVCTelephony()
+                        if params.participant.kind
+                        == rtc.ParticipantKind.PARTICIPANT_KIND_SIP
+                        else noise_cancellation.BVC()
+                    )
                 ),
             ),
-        ),
-    )
-
-    # Track the last user query and log it with the assistant's response to the frontend
-    last_user_query = None
-
-    @session.on("conversation_item_added")
-    def on_conversation_item_added(event: ConversationItemAddedEvent):
-        nonlocal last_user_query
-        item = event.item
-        role = getattr(item, "role", None)
-        text = (
-            getattr(item, "text_content", None)
-            or getattr(item, "text", None)
-            or getattr(item, "content", None)
         )
 
-        if not role or not text:
-            return
-
-        if role == "user":
-            last_user_query = text
-            logger.info(f"Logged user query: {text}")
-        elif role == "assistant" and last_user_query:
-            logger.info(
-                f"Logging complete turn to frontend: Q='{last_user_query}', A='{text}'"
+        @session.on("conversation_item_added")
+        def on_conversation_item_added(event: ConversationItemAddedEvent):
+            item = event.item
+            role = getattr(item, "role", None)
+            text = (
+                getattr(item, "text_content", None)
+                or getattr(item, "text", None)
+                or getattr(item, "content", None)
             )
-            from datetime import datetime
+            if not role or not isinstance(text, str) or not text.strip():
+                return
+            if role == "user":
+                analytics.observe_user(text)
+            elif role == "assistant":
+                analytics.observe_assistant(text)
 
-            import requests
+        # Join the room and connect to the user
+        await ctx.connect()
 
-            payload = {
-                "user_id": user_id,
-                "query": last_user_query,
-                "response": text,
-                "timestamp": datetime.now().isoformat(),
-            }
+        # Wait a short moment to retrieve remote participant details
+        user_id = "unknown"
+        for _ in range(10):
+            participants = list(ctx.room.remote_participants.values())
+            if participants:
+                user_id = participants[0].identity
+                break
+            await asyncio.sleep(0.1)
 
-            def post_query():
-                try:
-                    res = requests.post(
-                        "http://localhost:3001/api/queries", json=payload, timeout=2.0
-                    )
-                    if res.status_code != 200:
-                        logger.warning(
-                            f"Failed to log query to frontend, status code: {res.status_code}"
-                        )
-                except Exception as ex:
-                    logger.error(f"Error logging query to frontend API: {ex}")
+        logger.info(f"Connected participant identity (User ID): {user_id}")
 
-            asyncio.get_event_loop().run_in_executor(None, post_query)
-            last_user_query = None
+        # Query caller profile from SQLite database
+        profile = None
+        if user_id != "unknown":
+            try:
+                profile = get_caller(user_id)
+            except Exception as e:
+                logger.error(f"Error querying database for caller profile: {e}")
 
-    # Join the room and connect to the user
-    await ctx.connect()
+        # Build dynamic prompt instructions and initial greeting
+        if profile:
+            name = profile.get("name")
+            crops = profile.get("crops_grown") or "फसलें"
+            district = profile.get("district") or "क्षेत्र"
+            land = profile.get("land_size") or "भूमि"
+            irrigation = profile.get("irrigation_type") or "सिंचाई"
+            conversation_memory = profile.get("conversation_memory") or "Not saved"
 
-    # Wait a short moment to retrieve remote participant details
-    user_id = "unknown"
-    for _ in range(10):
-        participants = list(ctx.room.remote_participants.values())
-        if participants:
-            user_id = participants[0].identity
-            break
-        await asyncio.sleep(0.1)
-
-    logger.info(f"Connected participant identity (User ID): {user_id}")
-
-    # Query caller profile from SQLite database
-    profile = None
-    if user_id != "unknown":
-        try:
-            profile = get_caller(user_id)
-        except Exception as e:
-            logger.error(f"Error querying database for caller profile: {e}")
-
-    # Build dynamic prompt instructions and initial greeting
-    if profile:
-        name = profile.get("name")
-        crops = profile.get("crops_grown") or "फसलें"
-        district = profile.get("district") or "क्षेत्र"
-        land = profile.get("land_size") or "भूमि"
-        irrigation = profile.get("irrigation_type") or "सिंचाई"
-        conversation_memory = profile.get("conversation_memory") or "Not saved"
-
-        await assistant.update_instructions(
-            SYSTEM_PROMPT
-            + f"""
+            await assistant.update_instructions(
+                SYSTEM_PROMPT
+                + f"""
 
 RETURNING USER PROFILE MEMORY:
 You are talking to a returning user who is a farmer. Address them warmly and refer to these details:
@@ -745,26 +933,39 @@ You are talking to a returning user who is a farmer. Address them warmly and ref
 
 Use these details only when relevant. If asked about a previous conversation, report only the saved conversation memory and never invent missing details.
 """
-        )
-        if name and name != "Unknown":
-            greeting = (
-                f"Welcome back, {name}. फिर से स्वागत है, {name} जी। "
-                "You may speak in English or Hindi. आप अंग्रेज़ी या हिंदी में बात कर सकते हैं।"
             )
+            if name and name != "Unknown":
+                greeting = (
+                    f"Welcome back, {name}. फिर से स्वागत है, {name} जी। "
+                    "You may speak in English or Hindi. आप अंग्रेज़ी या हिंदी में बात कर सकते हैं।"
+                )
+            else:
+                greeting = (
+                    "Welcome back! फिर से स्वागत है! You may speak in English or Hindi. "
+                    "आप अंग्रेज़ी या हिंदी में बात कर सकते हैं।"
+                )
         else:
             greeting = (
-                "Welcome back! फिर से स्वागत है! You may speak in English or Hindi. "
-                "आप अंग्रेज़ी या हिंदी में बात कर सकते हैं।"
+                "Hello! नमस्कार! I am Kisan Sahayak. You may ask your farming or "
+                "weather question in English or Hindi. आप अंग्रेज़ी या हिंदी में पूछ सकते हैं।"
             )
-    else:
-        greeting = (
-            "Hello! नमस्कार! I am Kisan Sahayak. You may ask your farming or "
-            "weather question in English or Hindi. आप अंग्रेज़ी या हिंदी में पूछ सकते हैं।"
-        )
 
-    # Speak the initial greeting
-    await session.say(greeting)
+        # Speak the initial greeting
+        await session.say(greeting)
+        # AgentSession owns the room lifecycle after start().  Returning from the
+        # job entrypoint is the supported LiveKit pattern; this installed SDK has
+        # no separate blocking lifecycle method. The registered shutdown callback
+        # records analytics when the participant later disconnects.
+    except Exception:
+        logger.exception("Unhandled browser agent exception.")
+        await finalize_analytics("agent_error")
+        raise
 
 
 if __name__ == "__main__":
-    cli.run_app(server)
+    try:
+        with browser_worker_lock():
+            cli.run_app(server)
+    except RuntimeError as exc:
+        logger.error("%s", exc)
+        raise SystemExit(1) from exc

@@ -1,19 +1,331 @@
+import ast
+import inspect
+import os
+import subprocess
+import sys
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
-from livekit.agents import AgentSession, inference, llm
+from livekit.agents import AgentSession, ChatContext, inference, llm
 
 import agent
 from agent import SYSTEM_PROMPT, Assistant
+from call_analytics import CallTracker
 from weather import WeatherLookupError, WeatherReport
+
+
+def test_browser_agent_uses_the_process_dispatch_name() -> None:
+    """Catch a worker ignoring the isolated dispatch name supplied at startup."""
+    child_env = os.environ.copy()
+    child_env["PYTHONPATH"] = str(Path(agent.__file__).parent)
+    child_env["KISAN_AGENT_NAME"] = "isolated-test-worker"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import agent; print(agent.server._agent_name)",
+        ],
+        check=False,
+        env=child_env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip().splitlines()[-1] == "isolated-test-worker"
+
+
+def test_hot_reloaded_dev_worker_defaults_to_primary_dispatch_name() -> None:
+    """Keep an already-running LiveKit dev watcher usable after this upgrade."""
+    child_env = os.environ.copy()
+    child_env["PYTHONPATH"] = str(Path(agent.__file__).parent)
+    child_env.pop("KISAN_AGENT_NAME", None)
+    child_code = f"""
+import runpy
+
+namespace = runpy.run_path({agent.__file__!r}, run_name="__mp_main__")
+print(namespace["BROWSER_AGENT_NAME"])
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", child_code],
+        check=False,
+        env=child_env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip().splitlines()[-1] == "kisan-sahayak-primary"
+
+
+def test_browser_worker_lock_refuses_a_second_backend_process(tmp_path: Path) -> None:
+    """Catch two dev workers registering the same browser agent concurrently."""
+    lock_factory = getattr(agent, "browser_worker_lock", None)
+    assert callable(lock_factory)
+
+    lock_path = tmp_path / "browser-worker.lock"
+    child_code = f"""
+from agent import browser_worker_lock
+
+try:
+    with browser_worker_lock({str(lock_path)!r}):
+        raise SystemExit(0)
+except RuntimeError:
+    raise SystemExit(23)
+"""
+    child_env = os.environ.copy()
+    child_env["PYTHONPATH"] = str(Path(agent.__file__).parent)
+
+    with lock_factory(lock_path):
+        completed = subprocess.run(
+            [sys.executable, "-c", child_code],
+            check=False,
+            env=child_env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+
+    assert completed.returncode == 23, completed.stderr
 
 
 def test_memory_tools_are_exposed_to_the_agent() -> None:
     """Catch removal of the lookup tool required for caller memory."""
     assert hasattr(Assistant, "get_caller_profile")
     assert hasattr(Assistant, "save_caller_profile")
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("My tomato leaves have black spots and are curling.", True),
+        ("There are white insects under my brinjal leaves.", True),
+        ("गेहूं की पत्तियां पीली होकर सूख रही हैं।", True),
+        ("Meri fasal mein keede lag gaye hain, specialist se connect karo.", True),
+        ("Please connect me to the crop problem specialist.", True),
+        ("What is today's weather in Lucknow?", False),
+        ("Which crop should I plant this season?", False),
+        ("How often should I irrigate wheat?", False),
+        ("What time is it in India?", False),
+        ("Remember that I grow tomatoes.", False),
+    ],
+)
+def test_crop_problem_router_only_selects_specialist_cases(
+    query: str, expected: bool
+) -> None:
+    """Catch symptom reports being missed or routine questions being transferred."""
+    router = getattr(agent, "needs_crop_problem_specialist", None)
+
+    assert callable(router)
+    assert router(query) is expected
+
+
+def test_crop_specialist_uses_a_distinct_murf_voice() -> None:
+    """Catch the specialist using an unsupported Samar voice configuration."""
+    specialist = agent.CropProblemSpecialist(chat_ctx=ChatContext())
+
+    assert specialist.tts.__class__.__module__.startswith("livekit.plugins.murf")
+    assert specialist.tts._opts.voice == "Samar"
+    assert specialist.tts._opts.style == "Conversational"
+
+
+@pytest.mark.asyncio
+async def test_crop_specialist_handoff_preserves_the_farmer_request() -> None:
+    """Catch a transfer that makes the farmer repeat the crop problem."""
+    prior_context = ChatContext()
+    prior_context.add_message(
+        role="user",
+        content="My tomato leaves have black spots and are curling.",
+    )
+    run_context = SimpleNamespace(
+        session=SimpleNamespace(current_agent=SimpleNamespace(chat_ctx=prior_context))
+    )
+    assistant = Assistant()
+    await assistant.on_user_turn_completed(
+        RecordingTurnContext(),
+        SimpleNamespace(
+            text_content="My tomato leaves have black spots and are curling."
+        ),
+    )
+
+    result = await assistant.handoff_to_crop_specialist(run_context)
+
+    specialist_type = getattr(agent, "CropProblemSpecialist", None)
+    assert specialist_type is not None
+    assert isinstance(result, tuple)
+    specialist, announcement = result
+    assert isinstance(specialist, specialist_type)
+    assert announcement == "I will connect you to our crop problem specialist."
+    assert [message.text_content for message in specialist.chat_ctx.messages()] == [
+        "My tomato leaves have black spots and are curling."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_crop_specialist_handoff_publishes_explicit_connecting_signal() -> None:
+    """Catch the website missing a handoff when the spoken announcement is fragmented."""
+    published: list[tuple[str, bool, str]] = []
+
+    class RecordingLocalParticipant:
+        async def publish_data(
+            self, payload: str, *, reliable: bool, topic: str
+        ) -> None:
+            published.append((payload, reliable, topic))
+
+    prior_context = ChatContext()
+    prior_context.add_message(
+        role="user",
+        content="My tomato leaves have black spots.",
+    )
+    run_context = SimpleNamespace(
+        session=SimpleNamespace(current_agent=SimpleNamespace(chat_ctx=prior_context))
+    )
+    assistant = Assistant(
+        agent_signal_publisher=RecordingLocalParticipant().publish_data
+    )
+    await assistant.on_user_turn_completed(
+        RecordingTurnContext(),
+        SimpleNamespace(text_content="My tomato leaves have black spots."),
+    )
+
+    await assistant.handoff_to_crop_specialist(run_context)
+
+    assert published == [
+        (
+            '{"type":"specialist_handoff","phase":"connecting"}',
+            True,
+            "kisan.sahayak.agent",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_room_signal_publisher_waits_until_the_room_is_connected() -> None:
+    """Catch local participant access during job setup before LiveKit connects."""
+    published: list[tuple[str, bool, str]] = []
+
+    class RecordingLocalParticipant:
+        async def publish_data(
+            self, payload: str, *, reliable: bool, topic: str
+        ) -> None:
+            published.append((payload, reliable, topic))
+
+    class DeferredRoom:
+        def __init__(self) -> None:
+            self.access_count = 0
+
+        @property
+        def local_participant(self) -> RecordingLocalParticipant:
+            self.access_count += 1
+            return RecordingLocalParticipant()
+
+    room = DeferredRoom()
+    publisher = agent.make_room_signal_publisher(room)
+
+    assert room.access_count == 0
+    await publisher("status", reliable=True, topic="agent-state")
+    assert room.access_count == 1
+    assert published == [("status", True, "agent-state")]
+
+
+@pytest.mark.asyncio
+async def test_crop_specialist_handoff_refuses_a_routine_weather_question() -> None:
+    """Catch a normal farming question being transferred unnecessarily."""
+    prior_context = ChatContext()
+    prior_context.add_message(
+        role="user",
+        content="What is today's weather in Lucknow?",
+    )
+    run_context = SimpleNamespace(
+        session=SimpleNamespace(current_agent=SimpleNamespace(chat_ctx=prior_context))
+    )
+    assistant = Assistant()
+    await assistant.on_user_turn_completed(
+        RecordingTurnContext(),
+        SimpleNamespace(text_content="What is today's weather in Lucknow?"),
+    )
+
+    result = await assistant.handoff_to_crop_specialist(run_context)
+
+    assert result == (
+        "This question does not need the crop problem specialist. "
+        "Continue helping as Kisan Sahayak."
+    )
+
+
+@pytest.mark.asyncio
+async def test_crop_specialist_introduces_itself_using_transferred_context() -> None:
+    """Catch a specialist that starts silently or asks the farmer to repeat."""
+    prior_context = ChatContext()
+    prior_context.add_message(
+        role="user",
+        content="My tomato leaves have black spots and are curling.",
+    )
+    specialist_type = agent.CropProblemSpecialist
+    specialist = specialist_type(chat_ctx=prior_context)
+    generated_replies: list[str] = []
+
+    class RecordingSession:
+        def generate_reply(self, *, instructions: str) -> None:
+            generated_replies.append(instructions)
+
+    specialist._get_activity_or_raise = lambda: SimpleNamespace(
+        session=RecordingSession()
+    )
+
+    await specialist.on_enter()
+
+    assert len(generated_replies) == 1
+    assert "Introduce yourself as the Crop Problem Specialist" in generated_replies[0]
+    assert "My tomato leaves have black spots and are curling." in generated_replies[0]
+    assert "Do not ask the farmer to repeat" in generated_replies[0]
+
+
+@pytest.mark.asyncio
+async def test_crop_specialist_publishes_active_signal_when_it_takes_over() -> None:
+    """Catch the page remaining in a connecting state after the specialist starts."""
+    published: list[tuple[str, bool, str]] = []
+
+    class RecordingLocalParticipant:
+        async def publish_data(
+            self, payload: str, *, reliable: bool, topic: str
+        ) -> None:
+            published.append((payload, reliable, topic))
+
+    specialist = agent.CropProblemSpecialist(
+        chat_ctx=ChatContext(),
+        agent_signal_publisher=RecordingLocalParticipant().publish_data,
+    )
+    specialist._get_activity_or_raise = lambda: SimpleNamespace(
+        session=SimpleNamespace(generate_reply=lambda **_: None),
+    )
+
+    await specialist.on_enter()
+
+    assert published == [
+        (
+            '{"type":"specialist_handoff","phase":"active"}',
+            True,
+            "kisan.sahayak.agent",
+        )
+    ]
+
+
+def test_browser_agent_uses_supported_livekit_session_lifecycle() -> None:
+    """Prevent the removed AgentSession.wait_for_shutdown API from returning."""
+    assert not hasattr(AgentSession, "wait_for_shutdown")
+    tree = ast.parse(inspect.getsource(agent.my_agent))
+    used_attributes = {
+        node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+    }
+    assert "wait_for_shutdown" not in used_attributes
 
 
 def test_memory_instructions_require_consent_before_saving() -> None:
@@ -89,6 +401,35 @@ async def test_weather_response_speaks_timestamped_live_data() -> None:
         "timestamp: 2026-08-10T14:15 local time."
     )
     assert "70% maximum chance of rain" in response
+
+
+@pytest.mark.asyncio
+async def test_weather_tool_marks_live_result_for_call_analytics() -> None:
+    async def weather_fetcher(district: str) -> WeatherReport:
+        return WeatherReport(
+            location_name=district,
+            observed_at="2026-08-13T10:00",
+            forecast_date="2026-08-13",
+            temperature_c=29,
+            weather_description="clear",
+            wind_speed_kmh=5,
+            minimum_temperature_c=24,
+            maximum_temperature_c=31,
+            precipitation_probability_percent=10,
+        )
+
+    recorded = []
+    tracker = CallTracker(
+        "browser", recorder=lambda record: recorded.append(record) or record
+    )
+    tracker.observe_user("What is the weather in Lucknow?")
+    assistant = Assistant(weather_fetcher=weather_fetcher, analytics=tracker)
+
+    await assistant._district_weather_response("Lucknow")
+    outcome = tracker.finalize()
+
+    assert outcome.outcome == "successful"
+    assert outcome.result_category == "live_weather_delivered"
 
 
 @pytest.mark.asyncio
@@ -182,6 +523,60 @@ async def test_short_ambiguous_turn_mirrors_caller_style() -> None:
 
     instruction = turn_context.messages[0][1]
     assert "Mirror the caller's vocabulary and script" in instruction
+
+
+@pytest.mark.asyncio
+async def test_crop_symptom_turn_requires_specialist_handoff() -> None:
+    """Catch the main agent diagnosing a crop problem instead of transferring it."""
+    assistant = Assistant()
+    turn_context = RecordingTurnContext()
+    message = SimpleNamespace(
+        text_content="My tomato leaves have black spots and are curling."
+    )
+
+    await assistant.on_user_turn_completed(turn_context, message)
+
+    instructions = "\n".join(content for _, content in turn_context.messages)
+    assert "handoff_to_crop_specialist" in instructions
+    assert "Do not diagnose the crop problem yourself" in instructions
+
+
+@pytest.mark.asyncio
+async def test_crop_specialist_turn_cannot_offer_human_escalation_first() -> None:
+    """Catch Day 7 escalation competing with the Day 9 specialist handoff."""
+    assistant = Assistant()
+
+    await assistant.on_user_turn_completed(
+        RecordingTurnContext(),
+        SimpleNamespace(
+            text_content="My tomato leaves have black spots and are curling."
+        ),
+    )
+
+    specialist_turn_tools = {tool.id for tool in assistant.tools}
+    assert "handoff_to_crop_specialist" in specialist_turn_tools
+    assert "create_escalation" not in specialist_turn_tools
+
+    await assistant.on_user_turn_completed(
+        RecordingTurnContext(),
+        SimpleNamespace(text_content="The exact mandi price is unavailable."),
+    )
+
+    routine_turn_tools = {tool.id for tool in assistant.tools}
+    assert "create_escalation" in routine_turn_tools
+
+
+@pytest.mark.asyncio
+async def test_normal_weather_turn_stays_with_main_agent() -> None:
+    """Catch ordinary weather help being incorrectly routed to the specialist."""
+    assistant = Assistant()
+    turn_context = RecordingTurnContext()
+    message = SimpleNamespace(text_content="What is today's weather in Lucknow?")
+
+    await assistant.on_user_turn_completed(turn_context, message)
+
+    instructions = "\n".join(content for _, content in turn_context.messages)
+    assert "handoff_to_crop_specialist" not in instructions
 
 
 def test_format_india_time_uses_exact_ist_clock_time() -> None:

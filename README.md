@@ -1,5 +1,30 @@
 # Farm & Field Voice Assistant — #VoiceForBharat Edition
 
+## Day 9 — Crop specialist handoff
+
+Kisan Sahayak now hands crop symptom, pest, disease, nutrient-deficiency, and
+unexplained crop-damage questions to a separate `CropProblemSpecialist` agent.
+Routine weather, irrigation, crop-selection, soil, memory, and time questions
+stay with the main agent. Before a transfer, Kisan Sahayak announces the
+handoff; the specialist receives a copy of the existing LiveKit chat context,
+introduces itself, and continues from the reported symptoms without asking the
+farmer to repeat the problem. The main agent speaks with Murf Anisha, while the
+specialist uses the distinct Murf Samar voice. During the transfer, the website
+shows “Connecting you to the specialist,” then identifies the crop specialist's
+listening, thinking, and speaking states.
+
+Try both routes:
+
+- Main agent: “What is today's weather in Lucknow?”
+- Specialist: “My tomato leaves have black spots and are curling.”
+
+## Day 8 — Call intelligence
+
+Open `/call-analytics` to view real browser and SIP outcomes from the local
+SQLite database. The dashboard shows total, successful, and failed calls,
+filters, trend data, channel/language breakdowns, and a privacy-safe recent-call
+ledger. Values are never seeded or hardcoded.
+
 A voice AI assistant designed to help Indian farmers with crop management, soil health, weather advisories, and farming techniques. Built for the **Farm & Field** track of the **10 Days of Voice Agents (#VoiceForBharat)** challenge.
 
 This agent connects speech-to-text (STT), a large language model (LLM), and text-to-speech (TTS) around a WebRTC transport layer to enable low-latency, natural, voice-based interactions.
@@ -128,7 +153,7 @@ flowchart LR
   # Windows (PowerShell)
   powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
   ```
-- **Node.js** 18+
+- **Node.js** 20+
 - **pnpm** — fast Node package manager
   ```bash
   npm install -g pnpm
@@ -138,7 +163,7 @@ flowchart LR
 ### Step 1: Clone the repo
 
 ```bash
-git clone https://github.com/murf-ai/murf-livekit-starter.git
+git clone https://github.com/Reet24-del/murf-livekit-starter.git
 cd murf-livekit-starter
 ```
 
@@ -197,7 +222,7 @@ cd backend && uv run python src/agent.py dev
 cd frontend && pnpm dev
 ```
 
-Then open **http://localhost:3000** in your browser.
+Then open **http://localhost:3001** in your browser.
 
 You should now see the voice agent UI. Click **Start talking**, allow microphone access, and speak — the agent will respond with Murf Falcon TTS. Ensure your backend and (if using Option B) LiveKit server are running.
 
@@ -226,7 +251,7 @@ The backend runs as a long-lived Python process that connects to LiveKit as an a
 
 ### Frontend (Next.js) — Deploy to Vercel
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/murf-ai/murf-livekit-starter&root-directory=frontend&env=LIVEKIT_URL,LIVEKIT_API_KEY,LIVEKIT_API_SECRET&project-name=murf-voice-agent&repository-name=murf-voice-agent)
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/Reet24-del/murf-livekit-starter&root-directory=frontend&env=LIVEKIT_URL,LIVEKIT_API_KEY,LIVEKIT_API_SECRET&project-name=kisan-sahayak&repository-name=kisan-sahayak)
 
 Set these environment variables in Vercel:
 
@@ -242,7 +267,7 @@ The frontend is a standard Next.js app. Point it at the same LiveKit instance yo
 The frontend and backend don't call each other directly — they both connect to **LiveKit**, which handles the real-time audio transport.
 
 1. Use the **same** `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET` on both Railway and Vercel
-2. Set `AGENT_NAME=my-agent` on Vercel — this matches the `agent_name="my-agent"` registered in `backend/src/agent.py`
+2. Set `AGENT_NAME=kisan-sahayak-primary` on Vercel — this matches the browser worker name used by `backend/src/agent.py`
 3. Verify: Railway logs should show the agent connected to LiveKit. Open your Vercel URL, click **Start talking** — the agent should respond
 
 If the agent doesn't connect, double-check that both services point to the same LiveKit project and that the backend is running (check Railway logs).
@@ -321,7 +346,7 @@ Before writing anything, the agent explains that it will share the caller identi
 
 Requests are real local SQLite records in `backend/memory.db`; this demo does not send them to an external help desk. Passwords, OTPs, PINs, account/card numbers, and long digit sequences are replaced with `[REDACTED]`, text is limited to 500 characters, and the full transcript is never stored. Repeated open or in-progress requests for the same caller and reason update the existing reference rather than creating duplicates.
 
-Open the staff dashboard at [http://localhost:3000/help-requests](http://localhost:3000/help-requests). Requests move through `open`, `in_progress`, and `resolved`. The reference format is `KS-YYYYMMDD-XXXX`; it is an honest tracking reference and does not promise an immediate response. If persistence fails, the agent recommends the Kisan Call Center at 1800-180-1551 or the local KVK.
+Open the staff dashboard at [http://localhost:3001/help-requests](http://localhost:3001/help-requests). Requests move through `open`, `in_progress`, and `resolved`. The reference format is `KS-YYYYMMDD-XXXX`; it is an honest tracking reference and does not promise an immediate response. If persistence fails, the agent recommends the Kisan Call Center or the local KVK.
 
 Demo prompts:
 

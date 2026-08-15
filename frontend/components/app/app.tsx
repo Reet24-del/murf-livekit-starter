@@ -54,7 +54,11 @@ export function App({ appConfig }: AppProps) {
   );
 
   return (
-    <AgentSessionProvider session={session} volume={1.0}>
+    <AgentSessionProvider
+      session={session}
+      volume={Math.min(Math.max(appConfig.audioPlaybackVolume ?? 1, 0), 1)}
+      muted={false}
+    >
       <AppSetup />
       <main className="min-h-svh w-full">
         <ViewController appConfig={appConfig} />
