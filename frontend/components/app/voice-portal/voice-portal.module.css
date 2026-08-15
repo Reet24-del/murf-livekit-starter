@@ -840,13 +840,12 @@
 
   .weatherPanel {
     display: grid;
-    grid-template-columns: auto 1fr;
-    column-gap: 18px;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .weatherPanel .panelHeading,
   .weatherPanel .panelDivider {
-    grid-column: 1 / -1;
+    grid-column: 1;
   }
 
   .temperature {
@@ -854,7 +853,8 @@
   }
 
   .panelMeta {
-    align-self: end;
+    align-self: auto;
+    margin-top: 2px;
     margin-bottom: 8px;
   }
 
