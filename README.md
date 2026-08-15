@@ -57,14 +57,6 @@ Only consented requests appear here. The dashboard stores a short redacted summa
 
 ![Human help request dashboard](frontend/public/screenshots/help-requests.jpg)
 
-### Responsive mobile experience
-
-<p align="center">
-  <img src="frontend/public/screenshots/kisan-sahayak-mobile.jpg" width="360" alt="Kisan Sahayak mobile voice portal" />
-</p>
-
-> The screenshots show local development data. No phone numbers, credentials, or full conversation transcripts are displayed.
-
 ## How it works
 
 ```mermaid
