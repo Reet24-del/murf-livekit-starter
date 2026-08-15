@@ -46,6 +46,7 @@ export default async function RootLayout({ children }: RootLayoutProps) {
     <html
       lang="en"
       suppressHydrationWarning
+      data-scroll-behavior="smooth"
       className={cn(commitMono.variable, 'scroll-smooth font-sans antialiased')}
     >
       <head>
